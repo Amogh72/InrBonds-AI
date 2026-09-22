@@ -298,7 +298,7 @@ def extract_canonical_document(
     # 1. Existing geometry-aware table extraction
     # -----------------------------------------------------
 
-    series_data = extract_series_terms(
+    series_data, tables_found = extract_series_terms(
         pdf_path,
         verbose=True,
     )
