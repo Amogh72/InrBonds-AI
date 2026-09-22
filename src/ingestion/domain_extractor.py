@@ -1169,6 +1169,48 @@ def extract_issue_name(text):
     return f"Tranche {match.group(1).upper()} Issue"
 
 
+def extract_shelf_limit(text):
+    """
+    Generic shelf-prospectus disclosure: the aggregate amount a shelf
+    program is registered for, stated as "Shelf Limit of <amount>"
+    (cover-page style) or "Shelf Limit ... being <amount>" (defined-terms
+    style). Only present for shelf-prospectus-based issuers - returns
+    None for a standalone single-issuance bond document, rather than
+    inventing a value.
+    """
+
+    match = re.search(
+        rf"Shelf\s+Limit\s*(?:of)?\s*({CURRENCY_AMOUNT})",
+        text,
+        re.IGNORECASE,
+    )
+
+    if not match:
+        match = re.search(
+            rf"Shelf\s+Limit.{{0,100}}?being,?\s*({CURRENCY_AMOUNT})",
+            text,
+            re.IGNORECASE | re.DOTALL,
+        )
+
+    return normalize_text(match.group(1)) if match else None
+
+
+def extract_green_shoe_option(text):
+    """
+    Generic market-standard "Green Shoe Option of <amount>" disclosure
+    (an over-allotment option, standard terminology across issuers).
+    Returns None for an issue without one.
+    """
+
+    match = re.search(
+        rf"Green\s+Shoe\s+Option\s*(?:of)?\s*({CURRENCY_AMOUNT})",
+        text,
+        re.IGNORECASE,
+    )
+
+    return normalize_text(match.group(1)) if match else None
+
+
 def extract_listing_exchange(text):
     """
     Generic SEBI-prospectus convention: "...proposed to be listed

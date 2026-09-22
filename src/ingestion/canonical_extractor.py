@@ -506,6 +506,29 @@ def _pick_canonical_entity(
     )
 
 
+def _entity_to_fact(
+    entity: Optional[Dict[str, Any]],
+    document_id: str,
+) -> Optional[Fact]:
+    """
+    Convert one domain_extractor.py entity (value + mentions) into a
+    Fact, citing the page of its first mention. Returns None if no
+    entity was passed in, so callers can chain this directly.
+    """
+
+    if entity is None:
+        return None
+
+    page = min(mention["start_page"] for mention in entity["mentions"])
+
+    return make_fact(
+        value=entity["value"],
+        document_id=document_id,
+        page=page,
+        raw_value=entity["value"],
+    )
+
+
 def _scan_pages_for_first_match(
     page_texts: Dict[int, str],
     extractor_fn,
@@ -590,6 +613,20 @@ def gather_domain_knowledge(pdf_path: Path) -> Dict[str, Any]:
 
     issuer_entity = _pick_canonical_entity(entities, "Issuer")
     base_issue_size_entity = _pick_canonical_entity(entities, "Base Issue Size")
+    security_cover_entity = _pick_canonical_entity(entities, "Security Cover")
+
+    # Exactly one trustee is mandated per issue (see BondIssue.debenture_trustee),
+    # so the canonical (most-mentioned) entity is the right choice here.
+    debenture_trustee_entity = _pick_canonical_entity(
+        entities, "Debenture Trustee"
+    )
+
+    # Several Lead Managers are routinely appointed together, so - unlike
+    # the single-valued entity types above - every distinct one found is
+    # kept, not just the most-mentioned.
+    lead_manager_entities = [
+        e for e in entities if e["entity_type"] == "Lead Manager"
+    ]
 
     issue_open_date, issue_open_page = _scan_pages_for_first_match(
         page_texts, domain_extractor.extract_issue_open_date
@@ -606,6 +643,12 @@ def gather_domain_knowledge(pdf_path: Path) -> Dict[str, Any]:
     listing_info, listing_page = _scan_pages_for_first_match(
         page_texts, domain_extractor.extract_listing_exchange
     )
+    shelf_limit, shelf_limit_page = _scan_pages_for_first_match(
+        page_texts, domain_extractor.extract_shelf_limit
+    )
+    green_shoe_option, green_shoe_page = _scan_pages_for_first_match(
+        page_texts, domain_extractor.extract_green_shoe_option
+    )
 
     ratings_raw = collect_ratings_from_pages(page_texts, alias_map)
 
@@ -613,6 +656,9 @@ def gather_domain_knowledge(pdf_path: Path) -> Dict[str, Any]:
         "total_pages": layout_document["total_pages"],
         "issuer_entity": issuer_entity,
         "base_issue_size_entity": base_issue_size_entity,
+        "security_cover_entity": security_cover_entity,
+        "debenture_trustee_entity": debenture_trustee_entity,
+        "lead_manager_entities": lead_manager_entities,
         "issue_open_date": issue_open_date,
         "issue_open_page": issue_open_page,
         "issue_close_date": issue_close_date,
@@ -622,6 +668,10 @@ def gather_domain_knowledge(pdf_path: Path) -> Dict[str, Any]:
         "issue_name": issue_name,
         "listing_info": listing_info,
         "listing_page": listing_page,
+        "shelf_limit": shelf_limit,
+        "shelf_limit_page": shelf_limit_page,
+        "green_shoe_option": green_shoe_option,
+        "green_shoe_page": green_shoe_page,
         "ratings_raw": ratings_raw,
     }
 
@@ -679,18 +729,29 @@ def extract_canonical_document(
 
     issue_terms = IssueTerms()
 
-    if domain["base_issue_size_entity"] is not None:
+    issue_terms.issue_size = _entity_to_fact(
+        domain["base_issue_size_entity"], document_id
+    )
+    issue_terms.security_cover = _entity_to_fact(
+        domain["security_cover_entity"], document_id
+    )
 
-        entity = domain["base_issue_size_entity"]
-        entity_page = min(
-            mention["start_page"] for mention in entity["mentions"]
+    if domain["shelf_limit"] is not None:
+
+        issue_terms.shelf_limit = make_fact(
+            value=domain["shelf_limit"],
+            document_id=document_id,
+            page=domain["shelf_limit_page"],
+            raw_value=domain["shelf_limit"],
         )
 
-        issue_terms.issue_size = make_fact(
-            value=entity["value"],
+    if domain["green_shoe_option"] is not None:
+
+        issue_terms.green_shoe_option = make_fact(
+            value=domain["green_shoe_option"],
             document_id=document_id,
-            page=entity_page,
-            raw_value=entity["value"],
+            page=domain["green_shoe_page"],
+            raw_value=domain["green_shoe_option"],
         )
 
     if domain["issue_open_date"] is not None:
@@ -770,12 +831,27 @@ def extract_canonical_document(
     # 6. Build issue
     # -----------------------------------------------------
 
+    debenture_trustee = _entity_to_fact(
+        domain["debenture_trustee_entity"], document_id
+    )
+
+    lead_managers = [
+        fact
+        for fact in (
+            _entity_to_fact(entity, document_id)
+            for entity in domain["lead_manager_entities"]
+        )
+        if fact is not None
+    ]
+
     issue = BondIssue(
         issue_id=f"{document_id}_issue_1",
         issue_name=domain["issue_name"],
         issue_type="NCD",
         terms=issue_terms,
         ratings=ratings,
+        debenture_trustee=debenture_trustee,
+        lead_managers=lead_managers,
         series=series,
         provenance=[],
     )

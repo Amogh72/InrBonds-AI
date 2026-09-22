@@ -93,6 +93,14 @@ class IssueTerms(BaseModel):
     listing: Optional[Fact] = None
     exchange: Optional[Fact] = None
     security_type: Optional[Fact] = None
+    # Present only for shelf-prospectus-based issuances (common for large
+    # repeat NCD issuers, but not universal - stays None for a standalone
+    # single-issuance bond document).
+    shelf_limit: Optional[Fact] = None
+    green_shoe_option: Optional[Fact] = None
+    # Minimum security cover as a percentage of outstanding principal +
+    # interest, for secured issues. None for unsecured issues.
+    security_cover: Optional[Fact] = None
     additional_terms: Dict[str, Fact] = Field(default_factory=dict)
 
 
@@ -105,6 +113,11 @@ class BondIssue(BaseModel):
     issue_type: Optional[str] = None
     terms: IssueTerms = Field(default_factory=IssueTerms)
     ratings: List[Rating] = Field(default_factory=list)
+    # Exactly one trustee is mandated per issue under SEBI NCS Regulations,
+    # so this stays singular (unlike lead_managers, where several are
+    # routinely appointed together).
+    debenture_trustee: Optional[Fact] = None
+    lead_managers: List[Fact] = Field(default_factory=list)
     series: List[BondSeries] = Field(default_factory=list)
     provenance: List[Provenance] = Field(default_factory=list)
 
