@@ -43,6 +43,7 @@ data/processed/
 
 # Raw PDFs
 data/raw/*.pdf
+!data/raw/pfc_ncd_2026.pdf
 
 # Jupyter
 .ipynb_checkpoints/
