@@ -30,6 +30,8 @@ from schema.canonical_schema import (
 )
 
 from ingestion.table_extractor import extract_series_terms
+from ingestion import pdf_parser
+from ingestion import domain_extractor
 
 
 # =========================================================
@@ -76,6 +78,32 @@ def first_page(series_data: Dict[str, Any]) -> int:
         return min(pages)
 
     return 1
+
+
+def classify_coupon_type(frequency_raw_value: Optional[str]) -> str:
+    """
+    Generic bond-terminology classification of the "Frequency of
+    Interest Payment" column into a small, industry-standard
+    coupon-structure vocabulary. Indian NCD prospectuses commonly
+    reuse this exact column for genuinely different concepts: a
+    true payment cadence (Annual/Semi-Annual/Quarterly/Monthly)
+    for coupon-bearing series, versus a non-periodic payoff
+    structure (Cumulative, Zero Coupon) for series that pay no
+    periodic interest at all. This is standard industry
+    terminology, not specific to any one issuer, and it never
+    replaces the raw `frequency` value - it's an additional,
+    normalized classification derived from the same source text.
+    """
+
+    text = (frequency_raw_value or "").lower()
+
+    if "zero coupon" in text:
+        return "Zero Coupon"
+
+    if "cumulative" in text:
+        return "Cumulative"
+
+    return "Coupon-Bearing"
 
 
 def normalize_category_name(category_id: str) -> str:
@@ -125,6 +153,12 @@ def convert_series(
     if data.get("frequency") is not None:
         terms.frequency = make_fact(
             value=data["frequency"],
+            document_id=document_id,
+            page=page,
+            raw_value=str(data["frequency"]),
+        )
+        terms.coupon_type = make_fact(
+            value=classify_coupon_type(str(data["frequency"])),
             document_id=document_id,
             page=page,
             raw_value=str(data["frequency"]),
@@ -280,6 +314,319 @@ def convert_series(
 
 
 # =========================================================
+# SHARED vs. SERIES-SPECIFIC TERMS
+# =========================================================
+
+# Scalar (non-category) SeriesTerms fields that CAN be shared
+# across every series of one issue. tenor/frequency/face_value
+# are deliberately excluded here - those genuinely vary per
+# series in every real prospectus seen so far, so they are never
+# even considered for hoisting. This list only decides which
+# fields are ELIGIBLE to be hoisted; a field is only actually
+# hoisted if every series' extracted value for it is identical
+# (see hoist_shared_series_terms), so a document where these
+# fields genuinely do vary per series is unaffected.
+HOISTABLE_SERIES_FIELDS = [
+    "minimum_application",
+    "mode_of_interest_payment",
+    "maturity_redemption",
+    "nature_of_indebtedness",
+    "put_call_option",
+]
+
+
+def hoist_shared_series_terms(
+    series_list: list,
+    issue_terms: "IssueTerms",
+) -> None:
+    """
+    A merged table cell that spans every series column (e.g. one
+    "Minimum Application" cell drawn across all 5 series) produces
+    the SAME Fact value on every BondSeries after table extraction.
+    Duplicating that fact 5 times misrepresents it as 5 independent
+    per-series facts, when it's actually one issue-level term.
+
+    For each field in HOISTABLE_SERIES_FIELDS, if every series
+    carries the exact same value for it, move it once onto
+    `issue_terms` (merging provenance from every series it came
+    from) and clear it from each series. A field that genuinely
+    differs across series - even for just one series - is left
+    exactly where it was.
+    """
+
+    if not series_list:
+        return
+
+    for field_name in HOISTABLE_SERIES_FIELDS:
+
+        facts = [getattr(series.terms, field_name) for series in series_list]
+
+        if any(fact is None for fact in facts):
+            continue
+
+        distinct_values = {fact.value for fact in facts}
+
+        if len(distinct_values) != 1:
+            continue
+
+        merged_provenance = []
+        seen_pages = set()
+
+        for fact in facts:
+            for prov in fact.provenance:
+                key = (prov.document_id, prov.page)
+                if key not in seen_pages:
+                    seen_pages.add(key)
+                    merged_provenance.append(prov)
+
+        template_fact = facts[0]
+
+        merged_fact = Fact(
+            value=template_fact.value,
+            unit=template_fact.unit,
+            raw_value=template_fact.raw_value,
+            provenance=merged_provenance,
+        )
+
+        if field_name == "nature_of_indebtedness":
+            issue_terms.security_type = merged_fact
+        else:
+            issue_terms.additional_terms[field_name] = merged_fact
+
+        for series in series_list:
+            setattr(series.terms, field_name, None)
+
+
+# =========================================================
+# TEXT/DOMAIN EXTRACTION INTEGRATION
+#
+# Combines table-derived series data (above) with text-derived
+# issuer/issue/rating data, using the existing domain_extractor.py
+# rather than a second, competing extraction system. This section
+# is the only place responsible for turning raw PDF page text into
+# the inputs domain_extractor.py expects (and into the smaller set
+# of document-level facts - issue dates, listing, ratings - that
+# domain_extractor.py's new page-scanning functions produce).
+# =========================================================
+
+# Target size for the lightweight text windows fed to
+# domain_extractor.extract_domain_knowledge(). This is NOT the
+# project's future retrieval/vector-DB chunker (chunker.py) - it
+# is a minimal, page-range-aware windowing utility that exists
+# only to give the entity/relationship extractor reasonably-sized
+# text to scan, with page-range provenance. It has no overlap and
+# no section-awareness; chunker.py's structure-aware chunks remain
+# the real chunking system for retrieval, to be wired in later.
+DOMAIN_CHUNK_TARGET_CHARS = 3500
+
+
+def _page_texts_from_layout(layout_document: Dict[str, Any]) -> Dict[int, str]:
+
+    page_texts = {}
+
+    for page in layout_document["pages"]:
+
+        lines = [
+            line["text"].strip()
+            for line in page["lines"]
+            if line["text"].strip()
+        ]
+
+        page_texts[page["page_number"]] = "\n".join(lines)
+
+    return page_texts
+
+
+def _build_domain_chunks(
+    layout_document: Dict[str, Any],
+    target_chars: int = DOMAIN_CHUNK_TARGET_CHARS,
+) -> Dict[str, Any]:
+
+    page_texts = _page_texts_from_layout(layout_document)
+
+    chunks = []
+    current_text = []
+    current_pages = []
+    current_length = 0
+
+    def flush():
+        if not current_text:
+            return
+        chunks.append({
+            "chunk_id": len(chunks) + 1,
+            "start_page": min(current_pages),
+            "end_page": max(current_pages),
+            "text": "\n\n".join(current_text),
+        })
+
+    for page_number in sorted(page_texts):
+
+        text = page_texts[page_number]
+
+        if not text:
+            continue
+
+        if current_length and current_length + len(text) > target_chars:
+            flush()
+            current_text = []
+            current_pages = []
+            current_length = 0
+
+        current_text.append(text)
+        current_pages.append(page_number)
+        current_length += len(text)
+
+    flush()
+
+    return {
+        "document": layout_document["document"],
+        "chunks": chunks,
+    }
+
+
+def _pick_canonical_entity(
+    entities: list,
+    entity_type: str,
+) -> Optional[Dict[str, Any]]:
+    """
+    Mirrors domain_extractor.pick_canonical_entity_of_type's
+    selection rule (most mentions, shorter value breaks ties),
+    applied to the flat, already-grouped `entities` list that
+    domain_extractor.extract_domain_knowledge() returns.
+    """
+
+    candidates = [e for e in entities if e["entity_type"] == entity_type]
+
+    if not candidates:
+        return None
+
+    return max(
+        candidates,
+        key=lambda e: (len(e["mentions"]), -len(e["value"])),
+    )
+
+
+def _scan_pages_for_first_match(
+    page_texts: Dict[int, str],
+    extractor_fn,
+):
+    """
+    Run a single-value page-level extractor (e.g.
+    domain_extractor.extract_issue_open_date) over every page in
+    order and return (value, page_number) for the first page that
+    produces a value, or (None, None) if no page does.
+    """
+
+    for page_number in sorted(page_texts):
+
+        normalized = domain_extractor.normalize_text(page_texts[page_number])
+        value = extractor_fn(normalized)
+
+        if value:
+            return value, page_number
+
+    return None, None
+
+
+def collect_ratings_from_pages(
+    page_texts: Dict[int, str],
+    alias_map: Dict[str, str],
+) -> list:
+    """
+    Scan every page for itemized credit-rating-letter facts (see
+    domain_extractor.extract_rating_letter_items), grouping repeat
+    occurrences of the SAME (agency, rating) pair into one item
+    with merged page provenance, and never merging two different
+    agencies' ratings into one item.
+    """
+
+    grouped: Dict[tuple, Dict[str, Any]] = {}
+
+    for page_number in sorted(page_texts):
+
+        normalized = domain_extractor.normalize_text(page_texts[page_number])
+
+        for item in domain_extractor.extract_rating_letter_items(normalized):
+
+            resolved_agency = alias_map.get(
+                domain_extractor.normalize_entity_value(item["agency"]),
+                item["agency"],
+            )
+
+            key = (
+                domain_extractor.normalize_entity_value(resolved_agency),
+                item["rating"],
+            )
+
+            if key not in grouped:
+                grouped[key] = {**item, "agency": resolved_agency, "pages": []}
+
+            if page_number not in grouped[key]["pages"]:
+                grouped[key]["pages"].append(page_number)
+
+    return list(grouped.values())
+
+
+def gather_domain_knowledge(pdf_path: Path) -> Dict[str, Any]:
+    """
+    Run the text/domain side of extraction: parse the PDF's text
+    layout, build lightweight windows for domain_extractor.py's
+    entity/relationship pipeline, and separately scan every page
+    for the document/issue-level facts (dates, listing, ratings)
+    that need page-precise provenance rather than chunk ranges.
+    """
+
+    layout_document = pdf_parser.parse_pdf_with_layout(pdf_path)
+    page_texts = _page_texts_from_layout(layout_document)
+
+    domain_chunks_doc = _build_domain_chunks(layout_document)
+    chunk_texts = [chunk["text"] for chunk in domain_chunks_doc["chunks"]]
+
+    entities, _relationships = domain_extractor.extract_domain_knowledge(
+        domain_chunks_doc
+    )
+
+    alias_map = domain_extractor.build_alias_map(chunk_texts)
+
+    issuer_entity = _pick_canonical_entity(entities, "Issuer")
+    base_issue_size_entity = _pick_canonical_entity(entities, "Base Issue Size")
+
+    issue_open_date, issue_open_page = _scan_pages_for_first_match(
+        page_texts, domain_extractor.extract_issue_open_date
+    )
+    issue_close_date, issue_close_page = _scan_pages_for_first_match(
+        page_texts, domain_extractor.extract_issue_close_date
+    )
+    document_date, document_date_page = _scan_pages_for_first_match(
+        page_texts, domain_extractor.extract_document_date
+    )
+    issue_name, _issue_name_page = _scan_pages_for_first_match(
+        page_texts, domain_extractor.extract_issue_name
+    )
+    listing_info, listing_page = _scan_pages_for_first_match(
+        page_texts, domain_extractor.extract_listing_exchange
+    )
+
+    ratings_raw = collect_ratings_from_pages(page_texts, alias_map)
+
+    return {
+        "total_pages": layout_document["total_pages"],
+        "issuer_entity": issuer_entity,
+        "base_issue_size_entity": base_issue_size_entity,
+        "issue_open_date": issue_open_date,
+        "issue_open_page": issue_open_page,
+        "issue_close_date": issue_close_date,
+        "issue_close_page": issue_close_page,
+        "document_date": document_date,
+        "document_date_page": document_date_page,
+        "issue_name": issue_name,
+        "listing_info": listing_info,
+        "listing_page": listing_page,
+        "ratings_raw": ratings_raw,
+    }
+
+
+# =========================================================
 # DOCUMENT EXTRACTION
 # =========================================================
 
@@ -325,52 +672,166 @@ def extract_canonical_document(
         )
 
     # -----------------------------------------------------
-    # 3. Build issue
-    #
-    # We deliberately keep issue metadata minimal for now.
-    # Text/domain extraction will populate additional
-    # document-level information in the next pass.
+    # 3. Text/domain extraction (issuer, issue terms, ratings)
+    # -----------------------------------------------------
+
+    domain = gather_domain_knowledge(pdf_path)
+
+    issue_terms = IssueTerms()
+
+    if domain["base_issue_size_entity"] is not None:
+
+        entity = domain["base_issue_size_entity"]
+        entity_page = min(
+            mention["start_page"] for mention in entity["mentions"]
+        )
+
+        issue_terms.issue_size = make_fact(
+            value=entity["value"],
+            document_id=document_id,
+            page=entity_page,
+            raw_value=entity["value"],
+        )
+
+    if domain["issue_open_date"] is not None:
+
+        issue_terms.issue_open_date = make_fact(
+            value=domain["issue_open_date"],
+            document_id=document_id,
+            page=domain["issue_open_page"],
+            raw_value=domain["issue_open_date"],
+        )
+
+    if domain["issue_close_date"] is not None:
+
+        issue_terms.issue_close_date = make_fact(
+            value=domain["issue_close_date"],
+            document_id=document_id,
+            page=domain["issue_close_page"],
+            raw_value=domain["issue_close_date"],
+        )
+
+    if domain["listing_info"] is not None:
+
+        issue_terms.exchange = make_fact(
+            value=domain["listing_info"]["exchange"],
+            document_id=document_id,
+            page=domain["listing_page"],
+            raw_value=domain["listing_info"]["exchange"],
+        )
+
+        issue_terms.listing = make_fact(
+            value=(
+                f"Listed on {domain['listing_info']['exchange']}"
+                + (
+                    f" (\"{domain['listing_info']['exchange_alias']}\")"
+                    if domain["listing_info"]["exchange_alias"]
+                    else ""
+                )
+            ),
+            document_id=document_id,
+            page=domain["listing_page"],
+        )
+
+    # -----------------------------------------------------
+    # 4. Hoist issue-level terms that were extracted onto
+    #    every series only because one merged table cell
+    #    physically spans all of them (see
+    #    hoist_shared_series_terms's docstring).
+    # -----------------------------------------------------
+
+    hoist_shared_series_terms(series, issue_terms)
+
+    # -----------------------------------------------------
+    # 5. Ratings - one Fact-like Rating object per agency,
+    #    never merging different agencies' ratings together.
+    # -----------------------------------------------------
+
+    ratings = [
+        Rating(
+            agency=item["agency"],
+            rating=item["rating"],
+            outlook=item["outlook"],
+            instrument="NCD",
+            rating_date=item["rating_date"],
+            provenance=[
+                make_provenance(
+                    document_id=document_id,
+                    page=page,
+                    source_text=item["source_text"],
+                )
+                for page in item["pages"]
+            ],
+        )
+        for item in domain["ratings_raw"]
+    ]
+
+    # -----------------------------------------------------
+    # 6. Build issue
     # -----------------------------------------------------
 
     issue = BondIssue(
         issue_id=f"{document_id}_issue_1",
-        issue_name=None,
+        issue_name=domain["issue_name"],
         issue_type="NCD",
-        terms=IssueTerms(),
-        ratings=[],
+        terms=issue_terms,
+        ratings=ratings,
         series=series,
         provenance=[],
     )
 
     # -----------------------------------------------------
-    # 4. Issuer
+    # 7. Issuer
     #
-    # Temporary generic placeholder until the textual
-    # domain extractor is connected.
+    # Resolved from domain_extractor.py's generic, structural
+    # company-name + label-proximity detection - never a
+    # hardcoded issuer name. Falls back to "UNKNOWN" if no
+    # Issuer-labeled company name was found anywhere in the
+    # document, rather than guessing.
     # -----------------------------------------------------
+
+    issuer_entity = domain["issuer_entity"]
+
+    if issuer_entity is not None:
+
+        issuer_page = min(
+            mention["start_page"] for mention in issuer_entity["mentions"]
+        )
+
+        issuer_name = issuer_entity["value"]
+        issuer_provenance = [
+            make_provenance(document_id=document_id, page=issuer_page)
+        ]
+
+    else:
+
+        issuer_name = "UNKNOWN"
+        issuer_provenance = []
 
     issuer = Issuer(
         issuer_id=f"{document_id}_issuer",
-        name="UNKNOWN",
+        name=issuer_name,
         legal_name=None,
         issuer_type=None,
         issues=[issue],
-        provenance=[],
+        provenance=issuer_provenance,
     )
 
     # -----------------------------------------------------
-    # 5. Document metadata
+    # 8. Document metadata
     # -----------------------------------------------------
 
     document = DocumentMetadata(
         document_id=document_id,
         document_name=document_name,
         document_type="Bond/NCD Prospectus",
+        document_date=domain["document_date"],
         source_file=str(pdf_path),
+        page_count=domain["total_pages"],
     )
 
     # -----------------------------------------------------
-    # 6. Canonical document
+    # 9. Canonical document
     # -----------------------------------------------------
 
     canonical = BondDocument(

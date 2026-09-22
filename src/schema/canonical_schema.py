@@ -51,6 +51,12 @@ class SeriesTerms(BaseModel):
 
     tenor: Optional[Fact] = None
     frequency: Optional[Fact] = None
+    # Generic classification of coupon structure (e.g. "Coupon-Bearing",
+    # "Cumulative", "Zero Coupon"), derived from `frequency` where that
+    # column actually describes a non-periodic payoff type rather than a
+    # true payment cadence. `frequency` always keeps the raw source value
+    # unchanged; this field never replaces it.
+    coupon_type: Optional[Fact] = None
     face_value: Optional[Fact] = None
     minimum_application: Optional[Fact] = None
     issue_price: Optional[Fact] = None

@@ -1062,6 +1062,217 @@ def extract_isin(text):
     ]
 
 
+# =========================================================
+# DOCUMENT/ISSUE-LEVEL EXTRACTORS
+#
+# These are called directly against a single page's (or the
+# whole document's) text by canonical_extractor.py, rather than
+# through the per-chunk entity/relationship pipeline above. They
+# answer a different kind of question: not "what entities are
+# mentioned anywhere in this document" (many mentions, graph
+# nodes), but "what is THE issue-open-date / THE listing
+# exchange / THE per-agency credit rating for this document"
+# (a small number of specific, structurally-located facts with
+# page-level provenance). Every pattern here is still a generic,
+# structural SEBI-prospectus convention - not tied to any one
+# issuer's wording - the same as everything above.
+# =========================================================
+
+MONTH_NAMES = (
+    r"(?:January|February|March|April|May|June|July|"
+    r"August|September|October|November|December)"
+)
+
+WEEKDAY_NAMES = (
+    r"(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)"
+)
+
+DATE_PATTERN = (
+    rf"(?:{WEEKDAY_NAMES},?\s+)?{MONTH_NAMES}\s+\d{{1,2}},?\s*\d{{4}}"
+)
+
+# Standard outlook vocabulary shared by every major Indian credit
+# rating agency (CRISIL/ICRA/CARE/India Ratings/Brickwork/Acuite
+# all use the same small set of outlook words) - generic
+# industry terminology, not specific to any one agency or issuer.
+OUTLOOK_VOCABULARY = [
+    "Stable", "Positive", "Negative", "Rating Watch",
+    "Under Review", "Developing",
+]
+
+
+def extract_issue_open_date(text):
+    """
+    Generic SEBI-prospectus "Issue Opens on <date>" disclosure
+    (optionally prefixed "Tranche N"). Standard across Indian NCD
+    prospectuses, not specific to any one issuer.
+    """
+
+    match = re.search(
+        rf"Issue\s+Opens?\s+on\s*:?\s*({DATE_PATTERN})",
+        text,
+        re.IGNORECASE,
+    )
+
+    return normalize_text(match.group(1)) if match else None
+
+
+def extract_issue_close_date(text):
+    """Symmetric counterpart to extract_issue_open_date."""
+
+    match = re.search(
+        rf"Issue\s+Closes?\s+on\s*:?\s*({DATE_PATTERN})",
+        text,
+        re.IGNORECASE,
+    )
+
+    return normalize_text(match.group(1)) if match else None
+
+
+def extract_document_date(text):
+    """
+    Generic SEBI-prospectus cover-page convention: a prospectus
+    states its own filing date as "this [Tranche N] Prospectus
+    dated <date>". Requiring the preceding "this" avoids picking
+    up a REFERENCED prior document's date (e.g. an earlier Shelf
+    Prospectus, which is a different document with its own,
+    earlier date).
+    """
+
+    match = re.search(
+        rf"this\s+(?:tranche\s+[ivxlcdm]+\s+)?prospectus\s+dated\s+"
+        rf"({DATE_PATTERN})",
+        text,
+        re.IGNORECASE,
+    )
+
+    return normalize_text(match.group(1)) if match else None
+
+
+def extract_issue_name(text):
+    """
+    Generic "Tranche N Issue" naming convention used by shelf
+    prospectuses that offer NCDs across multiple tranches. Returns
+    None (rather than inventing a name) for issuers/documents that
+    don't use tranche structuring at all.
+    """
+
+    match = re.search(
+        r"TRANCHE\s+([IVXLCDM]+)\s+ISSUE\b",
+        text,
+        re.IGNORECASE,
+    )
+
+    if not match:
+        return None
+
+    return f"Tranche {match.group(1).upper()} Issue"
+
+
+def extract_listing_exchange(text):
+    """
+    Generic SEBI-prospectus convention: "...proposed to be listed
+    on the <Exchange Name> ("<Alias>") ...". Returns
+    {"exchange": full_name, "exchange_alias": alias_or_None} or
+    None if the phrase isn't present.
+    """
+
+    match = re.search(
+        r'listed on the\s+([A-Z][\w .]+?(?:Limited|Ltd\.?))'
+        r'(?:\s*\(["“]([A-Za-z0-9 .&\'-]{1,20})["”]\))?',
+        text,
+    )
+
+    if not match:
+        return None
+
+    return {
+        "exchange": normalize_text(match.group(1)),
+        "exchange_alias": (
+            normalize_text(match.group(2)) if match.group(2) else None
+        ),
+    }
+
+
+def _clean_rating_grade_block(raw_block):
+    """
+    Split a raw rating-grade text block (captured between
+    "assigning a rating of" and "in respect of") into a short
+    core rating notation and, where the text states one, a
+    separately identifiable outlook word from OUTLOOK_VOCABULARY.
+    The full raw block is always preserved by the caller as
+    source_text, so nothing here is lossy - this is purely a
+    convenience split for structured querying.
+    """
+
+    text = raw_block.strip()
+    paren_index = text.find("(")
+
+    core = text[:paren_index] if paren_index != -1 else text
+    explanation = text[paren_index:] if paren_index != -1 else ""
+
+    core = core.strip(" \t\n" + QUOTE_CHARS)
+
+    outlook = None
+
+    for candidate_text in (core, explanation, text):
+
+        for word in OUTLOOK_VOCABULARY:
+
+            if re.search(rf"\b{re.escape(word)}\b", candidate_text, re.IGNORECASE):
+                outlook = word
+                break
+
+        if outlook:
+            break
+
+    return core, outlook
+
+
+# Generic SEBI-prospectus "Documents for Inspection" / "Material
+# Contracts" annexure convention: every credit rating letter
+# obtained for an issue is individually itemized this way,
+# regardless of how many agencies rated the issue or what their
+# names are - the pattern is the structural marker, not any
+# agency's literal name.
+RATING_LETTER_PATTERN = re.compile(
+    r"(?i:credit rating letter dated)\s+(?P<date>" + DATE_PATTERN + r").*?"
+    r"(?i:by)\s+(?P<agency>[A-Z][\w.&-]*(?:\s+[A-Z][\w.&-]*){0,3}?)\s+"
+    r"(?i:assigning a rating of)\s+(?P<grade>.*?)"
+    r"(?i:in respect of)",
+    re.DOTALL,
+)
+
+
+def extract_rating_letter_items(text):
+    """
+    Extract individually-itemized credit rating letters (see
+    RATING_LETTER_PATTERN). Returns a list of dicts:
+        {agency, rating, outlook, rating_date, source_text}
+    Never merges two agencies' ratings into one item - each
+    regex match is one agency's one rating letter.
+    """
+
+    results = []
+
+    for match in RATING_LETTER_PATTERN.finditer(text):
+
+        core, outlook = _clean_rating_grade_block(match.group("grade"))
+
+        if not core:
+            continue
+
+        results.append({
+            "agency": normalize_text(match.group("agency")),
+            "rating": core,
+            "outlook": outlook,
+            "rating_date": normalize_text(match.group("date")),
+            "source_text": normalize_text(match.group(0)),
+        })
+
+    return results
+
+
 ENTITY_EXTRACTORS = [
     extract_labeled_entities,
     extract_credit_rating_grade,
