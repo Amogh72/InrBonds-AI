@@ -374,14 +374,21 @@ def _is_nameable_token(token):
     a small connector word/ampersand commonly found inside
     company names.
 
-    Digit-bearing tokens are deliberately excluded even though
-    they're often capitalized (e.g. "CIN:", ISIN codes like
-    "INE001A01036", registration numbers) - real company names
-    essentially never contain digits, and without this check
-    those codes chain onto a nearby real company name and
-    produce garbage captures (confirmed against the real PDF,
-    where a CIN/ISIN block sits directly next to "Beacon
-    Trusteeship Limited").
+    A token mixing letters AND digits is excluded (e.g. "CIN:",
+    ISIN codes like "INE001A01036", registration numbers, "PAN:
+    AAACP1570H") - that's the actual shape of a code/identifier,
+    and without this check those codes chain onto a nearby real
+    company name and produce garbage captures (confirmed against
+    the real PDF, where a CIN/ISIN block sits directly next to
+    "Beacon Trusteeship Limited").
+
+    A PURELY numeric token is a different shape and is NOT
+    excluded - confirmed against a second real prospectus, where
+    excluding "360" truncated the issuer's actual name, "360 ONE
+    Prime Limited", down to "ONE Prime Limited". A stylized
+    numeral used as a brand word is a real, if less common,
+    company-naming pattern; a code/identifier mixing letters and
+    digits in one token is not.
     """
 
     if any(char in DEFINED_TERM_QUOTE_CHARS for char in token):
@@ -407,8 +414,14 @@ def _is_nameable_token(token):
     if cleaned.lower() in JOB_TITLE_WORDS:
         return False
 
-    if any(char.isdigit() for char in cleaned):
+    has_digit = any(char.isdigit() for char in cleaned)
+    has_letter = any(char.isalpha() for char in cleaned)
+
+    if has_digit and has_letter:
         return False
+
+    if has_digit and not has_letter:
+        return True
 
     return cleaned[0].isupper()
 
@@ -1197,8 +1210,14 @@ def extract_shelf_limit(text):
 
 def extract_green_shoe_option(text):
     """
-    Generic market-standard "Green Shoe Option of <amount>" disclosure
-    (an over-allotment option, standard terminology across issuers).
+    Generic market-standard "Green Shoe Option" disclosure (an
+    over-allotment option). Confirmed against two real prospectuses
+    that state it in opposite orders: "Green Shoe Option of
+    <amount>" (term then amount), and "<amount> ("Green Shoe
+    Option")" (amount then term, as a trailing defined-term alias -
+    matching this direction too is what stopped an unrelated,
+    similarly-worded amount from a HISTORICAL issuances table
+    elsewhere in that same document from being picked up instead).
     Returns None for an issue without one.
     """
 
@@ -1207,6 +1226,14 @@ def extract_green_shoe_option(text):
         text,
         re.IGNORECASE,
     )
+
+    if not match:
+        match = re.search(
+            rf"({CURRENCY_AMOUNT})\s*\([" + QUOTE_CHARS + r"]\s*"
+            rf"Green\s+Shoe\s+Option\s*[" + QUOTE_CHARS + r"]\)",
+            text,
+            re.IGNORECASE,
+        )
 
     return normalize_text(match.group(1)) if match else None
 
@@ -1238,37 +1265,30 @@ def extract_listing_exchange(text):
 
 def _clean_rating_grade_block(raw_block):
     """
-    Split a raw rating-grade text block (captured between
-    "assigning a rating of" and "in respect of") into a short
-    core rating notation and, where the text states one, a
-    separately identifiable outlook word from OUTLOOK_VOCABULARY.
-    The full raw block is always preserved by the caller as
-    source_text, so nothing here is lossy - this is purely a
-    convenience split for structured querying.
+    Normalize a captured rating-grade string and, where it states
+    one, pull out a separately identifiable outlook word from
+    OUTLOOK_VOCABULARY. The full raw block is always preserved by
+    the caller as source_text, so nothing here is lossy - this is
+    purely a convenience split for structured querying.
     """
 
-    text = raw_block.strip()
-    paren_index = text.find("(")
+    text = normalize_text(raw_block).strip(" \t\n" + QUOTE_CHARS)
 
-    core = text[:paren_index] if paren_index != -1 else text
-    explanation = text[paren_index:] if paren_index != -1 else ""
-
-    core = core.strip(" \t\n" + QUOTE_CHARS)
+    # A "(pronounced ...)" aside is a pronunciation guide, never part
+    # of the rating notation itself - safe to drop wherever it lands
+    # inside the captured grade text (some prospectuses' quote marks
+    # span the whole thing, others stop short of it).
+    text = re.sub(r"\(\s*pronounced.*?\)", "", text, flags=re.IGNORECASE).strip()
 
     outlook = None
 
-    for candidate_text in (core, explanation, text):
+    for word in OUTLOOK_VOCABULARY:
 
-        for word in OUTLOOK_VOCABULARY:
-
-            if re.search(rf"\b{re.escape(word)}\b", candidate_text, re.IGNORECASE):
-                outlook = word
-                break
-
-        if outlook:
+        if re.search(rf"\b{re.escape(word)}\b", text, re.IGNORECASE):
+            outlook = word
             break
 
-    return core, outlook
+    return text, outlook
 
 
 # Generic SEBI-prospectus "Documents for Inspection" / "Material
@@ -1277,11 +1297,29 @@ def _clean_rating_grade_block(raw_block):
 # regardless of how many agencies rated the issue or what their
 # names are - the pattern is the structural marker, not any
 # agency's literal name.
+#
+# The grade itself is captured strictly between a quote character
+# and the next closing quote character of ANY kind (straight or
+# curly, opening/closing type not required to match - real PDF
+# text layers routinely produce mismatched quote pairs). This is
+# deliberately NOT bounded by a trailing phrase like "in respect
+# of": a first version of this pattern did that and, confirmed
+# against a second real prospectus that closes each item with "for
+# the Issue" instead, silently consumed several unrelated
+# following list items (annexure entries 13-18) as part of one
+# match - which also meant the next agency's own rating letter
+# item was skipped entirely, since finditer resumes after the
+# over-long match. Stopping at the nearest quote character avoids
+# depending on any particular closing phrase at all. Both the
+# preceding text runs and the grade itself are also bounded to a
+# generous but finite length as defense in depth, so a document
+# using neither expected phrasing fails to match cleanly rather
+# than running away across the page.
 RATING_LETTER_PATTERN = re.compile(
-    r"(?i:credit rating letter dated)\s+(?P<date>" + DATE_PATTERN + r").*?"
+    r"(?i:credit rating letter dated)\s+(?P<date>" + DATE_PATTERN + r").{0,250}?"
     r"(?i:by)\s+(?P<agency>[A-Z][\w.&-]*(?:\s+[A-Z][\w.&-]*){0,3}?)\s+"
-    r"(?i:assigning a rating of)\s+(?P<grade>.*?)"
-    r"(?i:in respect of)",
+    r"(?i:assigning a rating of)\s*"
+    r"[" + QUOTE_CHARS + r"](?P<grade>.{2,150}?)[" + QUOTE_CHARS + r"]",
     re.DOTALL,
 )
 

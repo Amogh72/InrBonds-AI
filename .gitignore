@@ -44,6 +44,7 @@ data/processed/
 # Raw PDFs
 data/raw/*.pdf
 !data/raw/pfc_ncd_2026.pdf
+!data/raw/iifl_wealth_prime_2023.pdf
 
 # Jupyter
 .ipynb_checkpoints/
