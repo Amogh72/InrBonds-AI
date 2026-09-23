@@ -590,16 +590,23 @@ def collect_ratings_from_pages(
     return list(grouped.values())
 
 
-def gather_domain_knowledge(pdf_path: Path) -> Dict[str, Any]:
+def gather_domain_knowledge(
+    pdf_path: Path,
+    layout_document: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """
     Run the text/domain side of extraction: parse the PDF's text
-    layout, build lightweight windows for domain_extractor.py's
+    layout (or reuse an already-parsed one, if the caller has one -
+    parsing a several-hundred-page PDF twice for the same run is
+    pure waste), build lightweight windows for domain_extractor.py's
     entity/relationship pipeline, and separately scan every page
     for the document/issue-level facts (dates, listing, ratings)
     that need page-precise provenance rather than chunk ranges.
     """
 
-    layout_document = pdf_parser.parse_pdf_with_layout(pdf_path)
+    if layout_document is None:
+        layout_document = pdf_parser.parse_pdf_with_layout(pdf_path)
+
     page_texts = _page_texts_from_layout(layout_document)
 
     domain_chunks_doc = _build_domain_chunks(layout_document)
@@ -684,7 +691,14 @@ def extract_canonical_document(
     pdf_path: str,
     document_id: str,
     document_name: Optional[str] = None,
+    layout_document: Optional[Dict[str, Any]] = None,
 ) -> BondDocument:
+    """
+    layout_document: an already-parsed pdf_parser.parse_pdf_with_layout()
+    result, if the caller has one (e.g. also running structure_detector
+    against the same PDF). Avoids parsing a several-hundred-page PDF
+    twice for one pipeline run; parsed internally if not given.
+    """
 
     pdf_path = Path(pdf_path)
 
@@ -725,7 +739,7 @@ def extract_canonical_document(
     # 3. Text/domain extraction (issuer, issue terms, ratings)
     # -----------------------------------------------------
 
-    domain = gather_domain_knowledge(pdf_path)
+    domain = gather_domain_knowledge(pdf_path, layout_document=layout_document)
 
     issue_terms = IssueTerms()
 

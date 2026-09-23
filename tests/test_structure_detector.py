@@ -21,22 +21,20 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from ingestion import pdf_parser  # noqa: E402
 from ingestion import structure_detector as sd  # noqa: E402
 
 from conftest import PFC_PDF, IIFL_PDF, requires_pfc_pdf, requires_iifl_pdf  # noqa: E402
 
 
 @pytest.fixture(scope="session")
-def pfc_structure():
-    layout = pdf_parser.parse_pdf_with_layout(PFC_PDF)
-    return sd.detect_structure(PFC_PDF, layout, verbose=False)
+def pfc_structure(pfc_layout):
+    """Reuses conftest.py's shared pfc_layout - see its docstring."""
+    return sd.detect_structure(PFC_PDF, pfc_layout, verbose=False)
 
 
 @pytest.fixture(scope="session")
-def iifl_structure():
-    layout = pdf_parser.parse_pdf_with_layout(IIFL_PDF)
-    return sd.detect_structure(IIFL_PDF, layout, verbose=False)
+def iifl_structure(iifl_layout):
+    return sd.detect_structure(IIFL_PDF, iifl_layout, verbose=False)
 
 
 @requires_pfc_pdf

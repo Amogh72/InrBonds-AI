@@ -10,6 +10,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from ingestion import canonical_extractor as ce  # noqa: E402
+from ingestion import pdf_parser  # noqa: E402
 from ingestion import table_extractor  # noqa: E402
 
 PFC_PDF = ROOT / "data" / "raw" / "pfc_ncd_2026.pdf"
@@ -45,7 +46,25 @@ def iifl_series_data():
 
 
 @pytest.fixture(scope="session")
-def pfc_document():
+def pfc_layout():
+    """
+    pdf_parser.parse_pdf_with_layout() result for PFC, computed once
+    per test session and shared by every fixture/test that needs
+    parsed page text (pfc_document below, and structure_detector
+    tests) - parsing a 274-page PDF with PyMuPDF more than once per
+    run is pure waste.
+    """
+    return pdf_parser.parse_pdf_with_layout(PFC_PDF)
+
+
+@pytest.fixture(scope="session")
+def iifl_layout():
+    """Same as pfc_layout, for the second (235-page) test document."""
+    return pdf_parser.parse_pdf_with_layout(IIFL_PDF)
+
+
+@pytest.fixture(scope="session")
+def pfc_document(pfc_layout):
     """
     Full canonical_extractor.py pipeline (table + text/domain
     extraction) against the real PFC prospectus. Session-scoped and
@@ -55,13 +74,15 @@ def pfc_document():
     return ce.extract_canonical_document(
         pdf_path=PFC_PDF,
         document_id="pfc_ncd_2026",
+        layout_document=pfc_layout,
     )
 
 
 @pytest.fixture(scope="session")
-def iifl_document():
+def iifl_document(iifl_layout):
     """Same as pfc_document, for the second (235-page) test document."""
     return ce.extract_canonical_document(
         pdf_path=IIFL_PDF,
         document_id="iifl_wealth_prime_2023",
+        layout_document=iifl_layout,
     )
