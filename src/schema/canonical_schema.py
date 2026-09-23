@@ -147,6 +147,35 @@ class DocumentMetadata(BaseModel):
     version: Optional[str] = None
 
 
+class Chunk(BaseModel):
+    """
+    A retrieval-oriented unit derived FROM this document's own facts/
+    text - never a second, independent extraction of the source PDF.
+    Two kinds coexist in one list rather than two separate files/
+    fields, distinguished by chunk_type:
+
+      "structured_fact" - one series' terms for one investor category
+      (or the series-level terms shared across categories), built
+      directly from the Facts already on that BondSeries/
+      InvestorCategory. Answers direct, structured-term questions.
+
+      "prose" - a window of the source PDF's running text (Risk
+      Factors, Objects of the Issue, covenants, etc.), for questions
+      whose answer isn't modeled as a Fact anywhere in this schema.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    chunk_id: str
+    chunk_type: str
+    text: str
+    start_page: Optional[int] = None
+    end_page: Optional[int] = None
+    section_path: Optional[List[str]] = None
+    series_id: Optional[str] = None
+    category_id: Optional[str] = None
+    provenance: List[Provenance] = Field(default_factory=list)
+
+
 class BondDocument(BaseModel):
     """Root canonical representation: one source document."""
     model_config = ConfigDict(extra="forbid")
@@ -154,6 +183,7 @@ class BondDocument(BaseModel):
     schema_version: str = "1.0"
     document: DocumentMetadata
     issuer: Issuer
+    chunks: List[Chunk] = Field(default_factory=list)
     provenance: List[Provenance] = Field(default_factory=list)
 
 
