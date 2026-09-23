@@ -51,6 +51,12 @@ class SeriesTerms(BaseModel):
 
     tenor: Optional[Fact] = None
     frequency: Optional[Fact] = None
+    # Generic classification of coupon structure (e.g. "Coupon-Bearing",
+    # "Cumulative", "Zero Coupon"), derived from `frequency` where that
+    # column actually describes a non-periodic payoff type rather than a
+    # true payment cadence. `frequency` always keeps the raw source value
+    # unchanged; this field never replaces it.
+    coupon_type: Optional[Fact] = None
     face_value: Optional[Fact] = None
     minimum_application: Optional[Fact] = None
     issue_price: Optional[Fact] = None
@@ -87,6 +93,14 @@ class IssueTerms(BaseModel):
     listing: Optional[Fact] = None
     exchange: Optional[Fact] = None
     security_type: Optional[Fact] = None
+    # Present only for shelf-prospectus-based issuances (common for large
+    # repeat NCD issuers, but not universal - stays None for a standalone
+    # single-issuance bond document).
+    shelf_limit: Optional[Fact] = None
+    green_shoe_option: Optional[Fact] = None
+    # Minimum security cover as a percentage of outstanding principal +
+    # interest, for secured issues. None for unsecured issues.
+    security_cover: Optional[Fact] = None
     additional_terms: Dict[str, Fact] = Field(default_factory=dict)
 
 
@@ -99,6 +113,11 @@ class BondIssue(BaseModel):
     issue_type: Optional[str] = None
     terms: IssueTerms = Field(default_factory=IssueTerms)
     ratings: List[Rating] = Field(default_factory=list)
+    # Exactly one trustee is mandated per issue under SEBI NCS Regulations,
+    # so this stays singular (unlike lead_managers, where several are
+    # routinely appointed together).
+    debenture_trustee: Optional[Fact] = None
+    lead_managers: List[Fact] = Field(default_factory=list)
     series: List[BondSeries] = Field(default_factory=list)
     provenance: List[Provenance] = Field(default_factory=list)
 
@@ -128,6 +147,35 @@ class DocumentMetadata(BaseModel):
     version: Optional[str] = None
 
 
+class Chunk(BaseModel):
+    """
+    A retrieval-oriented unit derived FROM this document's own facts/
+    text - never a second, independent extraction of the source PDF.
+    Two kinds coexist in one list rather than two separate files/
+    fields, distinguished by chunk_type:
+
+      "structured_fact" - one series' terms for one investor category
+      (or the series-level terms shared across categories), built
+      directly from the Facts already on that BondSeries/
+      InvestorCategory. Answers direct, structured-term questions.
+
+      "prose" - a window of the source PDF's running text (Risk
+      Factors, Objects of the Issue, covenants, etc.), for questions
+      whose answer isn't modeled as a Fact anywhere in this schema.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    chunk_id: str
+    chunk_type: str
+    text: str
+    start_page: Optional[int] = None
+    end_page: Optional[int] = None
+    section_path: Optional[List[str]] = None
+    series_id: Optional[str] = None
+    category_id: Optional[str] = None
+    provenance: List[Provenance] = Field(default_factory=list)
+
+
 class BondDocument(BaseModel):
     """Root canonical representation: one source document."""
     model_config = ConfigDict(extra="forbid")
@@ -135,6 +183,7 @@ class BondDocument(BaseModel):
     schema_version: str = "1.0"
     document: DocumentMetadata
     issuer: Issuer
+    chunks: List[Chunk] = Field(default_factory=list)
     provenance: List[Provenance] = Field(default_factory=list)
 
 
