@@ -2,7 +2,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 # ---------------------------------------------------------
 # Make src/ available for imports when running this file
@@ -18,6 +18,7 @@ from schema.canonical_schema import (
     BondDocument,
     BondIssue,
     BondSeries,
+    Chunk,
     DocumentMetadata,
     Fact,
     InvestorCategory,
@@ -684,6 +685,294 @@ def gather_domain_knowledge(
 
 
 # =========================================================
+# STRUCTURED-FACT CHUNK GENERATION
+#
+# One retrieval-oriented Chunk per meaningful group of Facts already
+# present on the BondDocument we just built - never a second,
+# independent extraction of the source PDF. See Chunk's docstring in
+# canonical_schema.py for the "structured_fact" vs "prose" split;
+# only "structured_fact" chunks are generated here.
+# =========================================================
+
+def _humanize_field_name(field_name: str) -> str:
+    return field_name.replace("_", " ").strip().title()
+
+
+def _fact_lines_and_provenance(
+    labeled_facts: List[Tuple[str, Optional[Fact]]],
+) -> Tuple[List[str], List[Provenance]]:
+    """
+    Turn a list of (label, Fact-or-None) pairs into readable text
+    lines and merged, deduplicated provenance. A Fact that is None
+    (the field simply doesn't apply to this series/issue) is
+    silently skipped, never rendered as "N/A" - only real extracted
+    values become chunk text.
+    """
+
+    lines = []
+    provenance: List[Provenance] = []
+    seen_pages = set()
+
+    for label, fact in labeled_facts:
+
+        if fact is None:
+            continue
+
+        # fact.value is this Fact's actual canonical value; raw_value
+        # is documented as an audit trail back to the original source
+        # text (which sometimes deliberately differs from value - see
+        # coupon_type, whose raw_value is the un-classified source
+        # text it was derived from) and is NOT a display preference,
+        # so it's never used here.
+        display_value = str(fact.value)
+
+        if fact.unit and fact.unit not in display_value:
+            display_value = f"{display_value} {fact.unit}"
+
+        lines.append(f"{label}: {display_value}")
+
+        for prov in fact.provenance:
+            key = (prov.document_id, prov.page)
+            if key not in seen_pages:
+                seen_pages.add(key)
+                provenance.append(prov)
+
+    return lines, provenance
+
+
+SERIES_TERM_LABELS = [
+    ("tenor", "Tenor"),
+    ("frequency", "Frequency of Interest Payment"),
+    ("coupon_type", "Coupon Type"),
+    ("face_value", "Face Value"),
+    ("minimum_application", "Minimum Application"),
+    ("mode_of_interest_payment", "Mode of Interest Payment"),
+    ("maturity_redemption", "Maturity/Redemption"),
+    ("nature_of_indebtedness", "Nature of Indebtedness"),
+    ("put_call_option", "Put/Call Option"),
+]
+
+CATEGORY_TERM_LABELS = {
+    "issue_price": "Issue Price",
+    "coupon": "Coupon",
+    "effective_yield": "Effective Yield",
+    "maturity_amount": "Maturity Amount",
+}
+
+
+def generate_series_category_chunks(
+    document_id: str,
+    issuer_name: str,
+    issue: BondIssue,
+    series: BondSeries,
+) -> List[Chunk]:
+    """
+    One structured_fact chunk per (series, investor category),
+    combining that series' own terms with that category's
+    category-specific terms - matching the shape a comparison
+    question ("effective yield of Series III for Category III") is
+    actually asking for. Falls back to a single series-level chunk
+    if the series has no investor categories at all, so those facts
+    are never silently dropped.
+    """
+
+    series_labeled = [
+        (label, getattr(series.terms, field))
+        for field, label in SERIES_TERM_LABELS
+    ]
+
+    header = [
+        f"Issuer: {issuer_name}",
+        f"Issue: {issue.issue_name or issue.issue_id}",
+        f"Series: {series.series_name}",
+    ]
+
+    if not series.investor_categories:
+
+        lines, provenance = _fact_lines_and_provenance(series_labeled)
+
+        if not lines:
+            return []
+
+        text = "\n".join(header + lines)
+
+        return [Chunk(
+            chunk_id=f"{document_id}_chunk_series_{series.series_number}",
+            chunk_type="structured_fact",
+            text=text,
+            series_id=series.series_id,
+            provenance=provenance,
+        )]
+
+    chunks = []
+
+    for category in series.investor_categories:
+
+        category_labeled = [
+            (
+                CATEGORY_TERM_LABELS.get(field_name, _humanize_field_name(field_name)),
+                fact,
+            )
+            for field_name, fact in category.terms.items()
+        ]
+
+        lines, provenance = _fact_lines_and_provenance(
+            series_labeled + category_labeled
+        )
+
+        if not lines:
+            continue
+
+        text = "\n".join(
+            header
+            + [f"Investor Category: {category.category_name or category.category_id}"]
+            + lines
+        )
+
+        chunks.append(Chunk(
+            chunk_id=(
+                f"{document_id}_chunk_series_{series.series_number}"
+                f"_cat_{category.category_id}"
+            ),
+            chunk_type="structured_fact",
+            text=text,
+            series_id=series.series_id,
+            category_id=category.category_id,
+            provenance=provenance,
+        ))
+
+    return chunks
+
+
+ISSUE_TERM_LABELS = [
+    ("issue_size", "Issue Size"),
+    ("issue_open_date", "Issue Open Date"),
+    ("issue_close_date", "Issue Close Date"),
+    ("allotment_date", "Deemed Date of Allotment"),
+    ("listing", "Listing"),
+    ("exchange", "Stock Exchange"),
+    ("security_type", "Security Type"),
+    ("shelf_limit", "Shelf Limit"),
+    ("green_shoe_option", "Green Shoe Option"),
+    ("security_cover", "Minimum Security Cover"),
+]
+
+
+def generate_issue_overview_chunk(
+    document_id: str,
+    issuer: Issuer,
+    issue: BondIssue,
+) -> List[Chunk]:
+    """
+    One structured_fact chunk for issuer identity + issue-level terms
+    that aren't specific to any one series (dates, sizing, listing,
+    trustee, lead managers) - so a question like "who is the
+    debenture trustee" or "what is the security cover" can be
+    answered from a structured fact, not only from prose.
+    """
+
+    header = [
+        f"Issuer: {issuer.name}",
+        f"Issue: {issue.issue_name or issue.issue_id}",
+    ]
+
+    term_labeled = [
+        (label, getattr(issue.terms, field))
+        for field, label in ISSUE_TERM_LABELS
+    ]
+
+    extra_labeled = [
+        (_humanize_field_name(field_name), fact)
+        for field_name, fact in issue.terms.additional_terms.items()
+    ]
+
+    party_labeled = [("Debenture Trustee", issue.debenture_trustee)]
+    party_labeled += [
+        ("Lead Manager", lead_manager) for lead_manager in issue.lead_managers
+    ]
+
+    lines, provenance = _fact_lines_and_provenance(
+        term_labeled + extra_labeled + party_labeled
+    )
+
+    if not lines:
+        return []
+
+    text = "\n".join(header + lines)
+
+    return [Chunk(
+        chunk_id=f"{document_id}_chunk_issue_overview",
+        chunk_type="structured_fact",
+        text=text,
+        provenance=provenance,
+    )]
+
+
+def generate_rating_chunks(
+    document_id: str,
+    issuer: Issuer,
+    issue: BondIssue,
+) -> List[Chunk]:
+    """One structured_fact chunk per credit rating - never merged."""
+
+    chunks = []
+
+    for index, rating in enumerate(issue.ratings, start=1):
+
+        lines = [
+            f"Issuer: {issuer.name}",
+            f"Credit Rating Agency: {rating.agency}",
+            f"Rating: {rating.rating}",
+        ]
+
+        if rating.outlook:
+            lines.append(f"Outlook: {rating.outlook}")
+
+        if rating.rating_date:
+            lines.append(f"Rating Date: {rating.rating_date}")
+
+        chunks.append(Chunk(
+            chunk_id=f"{document_id}_chunk_rating_{index}",
+            chunk_type="structured_fact",
+            text="\n".join(lines),
+            provenance=rating.provenance,
+        ))
+
+    return chunks
+
+
+def generate_structured_fact_chunks(document: BondDocument) -> List[Chunk]:
+    """
+    Every structured_fact Chunk this document currently has facts
+    for: one per (series, investor category), one issue overview, and
+    one per rating. Purely derived from Facts already on `document` -
+    generates no new values and never re-reads the source PDF.
+    """
+
+    document_id = document.document.document_id
+    issuer = document.issuer
+    chunks: List[Chunk] = []
+
+    for issue in issuer.issues:
+
+        chunks.extend(
+            generate_issue_overview_chunk(document_id, issuer, issue)
+        )
+        chunks.extend(
+            generate_rating_chunks(document_id, issuer, issue)
+        )
+
+        for series in issue.series:
+            chunks.extend(
+                generate_series_category_chunks(
+                    document_id, issuer.name, issue, series
+                )
+            )
+
+    return chunks
+
+
+# =========================================================
 # DOCUMENT EXTRACTION
 # =========================================================
 
@@ -930,6 +1219,15 @@ def extract_canonical_document(
         issuer=issuer,
         provenance=[],
     )
+
+    # -----------------------------------------------------
+    # 10. Structured-fact chunks, derived from the Facts already
+    #     assembled above - see generate_structured_fact_chunks'
+    #     docstring. Prose chunks (from chunker.py) are not merged
+    #     in yet; see Chunk's docstring in canonical_schema.py.
+    # -----------------------------------------------------
+
+    canonical.chunks = generate_structured_fact_chunks(canonical)
 
     return validate_canonical_document(canonical)
 
