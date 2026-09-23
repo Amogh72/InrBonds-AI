@@ -11,6 +11,7 @@ text/domain extraction), so they stay fast.
 import pytest
 
 from conftest import requires_pfc_pdf, requires_iifl_pdf
+from ingestion import table_extractor as te
 
 
 @requires_pfc_pdf
@@ -98,3 +99,74 @@ class TestIIFLSeriesExtraction:
         assert series["tenor"] == tenor
         assert series["frequency"] == frequency
         assert series["coupon_by_category"]["default"] == coupon
+
+
+class TestSeriesCellFootnoteMarkers:
+    """
+    is_series_cell/normalize_series_id, isolated from any PDF - these
+    exist because a real prospectus (Capri Global) marked a "default
+    allocation" series column "V**" (double asterisk), which the
+    original single-optional-"*" pattern rejected outright, silently
+    dropping the whole series from extraction.
+    """
+
+    @pytest.mark.parametrize(
+        "cell,expected",
+        [
+            ("I", True),
+            ("II*", True),
+            ("V**", True),
+            ("III", True),
+            ("ISIN", False),
+            ("Category III", False),
+        ],
+    )
+    def test_is_series_cell(self, cell, expected):
+        assert te.is_series_cell(cell) is expected
+
+    @pytest.mark.parametrize(
+        "cell,expected",
+        [
+            ("I", "I"),
+            ("II*", "II"),
+            ("V**", "V"),
+        ],
+    )
+    def test_normalize_series_id_strips_footnote_markers(self, cell, expected):
+        assert te.normalize_series_id(cell) == expected
+
+
+class TestExtractCategoryGenericCombinations:
+    """
+    extract_category(), isolated from any PDF - these exist because
+    a real prospectus (Capri Global) labels one row "... for NCD
+    Holders in Category I, II, III & IV" (all four categories
+    sharing one value), which a fixed-combination matcher collapsed
+    to just "I_II" by matching "category i, ii" as a substring and
+    never checking whether "iii"/"iv" were also present.
+    """
+
+    @pytest.mark.parametrize(
+        "label,expected",
+        [
+            ("Category I and Category II", "I_II"),
+            ("Category I & Category II", "I_II"),
+            ("Cat I and Cat II", "I_II"),
+            ("Cat I & Cat II", "I_II"),
+            ("Category III", "III"),
+            ("Cat III", "III"),
+            ("Category IV", "IV"),
+            (
+                "Coupon (% per annum) for NCD Holders in Category I, II, III & IV",
+                "I_II_III_IV",
+            ),
+            (
+                "Effective Yield (per annum) for NCD Holders in "
+                "Category I, II, III & IV",
+                "I_II_III_IV",
+            ),
+            ("Tenor", None),
+        ],
+    )
+    def test_extract_category(self, label, expected):
+        assert te.extract_category(label) == expected

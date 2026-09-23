@@ -149,3 +149,69 @@ class TestShelfLimit:
     def test_cover_page_style(self):
         text = "WHICH IS WITHIN THE SHELF LIMIT OF ₹10,000 CRORE AND IS"
         assert de.extract_shelf_limit(text) == "₹10,000 CRORE"
+
+
+class TestRatingLetterItemsAltConvention:
+    """
+    A third real prospectus (Capri Global Capital Limited) uses a
+    rating-letter convention neither PFC nor IIFL do: "rated
+    "<grade>" for an amount of <amount> by <agency> vide its rating
+    letter dated <date>" - and only the FIRST of several items keeps
+    the word "rated"; later ones just start with the quoted grade.
+    RATING_LETTER_PATTERN (the "credit rating letter dated ... by
+    ... assigning a rating of" convention) never matches this text
+    at all, so extract_rating_letter_items() needs its ALT pattern
+    to pick it up.
+    """
+
+    def test_two_agencies_alt_convention_both_captured(self):
+        text = (
+            'The NCDs proposed to be issued under the Issue have been rated '
+            '“ACUITE AA | Stable” for an amount of ₹20,000.00 '
+            'million by Acuite Ratings & Research Limited vide its rating '
+            'letter dated March 19, 2026, and press release for rating '
+            'rationale dated March \n19, 2026, and “IVR AA/ Positive” '
+            'for an amount of ₹20,000.00 million by Infomerics Valuation '
+            'and Rating Limited vide its rating letter dated March 18, 2026, '
+            'and press release for rating rationale dated March 20, 2026.'
+        )
+
+        items = de.extract_rating_letter_items(text)
+
+        assert len(items) == 2
+        assert items[0]["agency"] == "Acuite Ratings & Research Limited"
+        assert items[0]["rating"] == "ACUITE AA | Stable"
+        assert items[0]["outlook"] == "Stable"
+        assert items[0]["rating_date"] == "March 19, 2026"
+        assert items[1]["agency"] == "Infomerics Valuation and Rating Limited"
+        assert items[1]["rating"] == "IVR AA/ Positive"
+        assert items[1]["outlook"] == "Positive"
+        assert items[1]["rating_date"] == "March 18, 2026"
+
+    def test_unrelated_earlier_quote_on_same_page_not_absorbed(self):
+        """
+        Page 1 has an unrelated quoted cross-reference ("Issue
+        Structure") before the real "CREDIT RATING" paragraph. A
+        first version of the ALT pattern's grade capture used an
+        unrestricted `.` that could cross other quote characters
+        under DOTALL, so when the nearest closing quote wasn't
+        immediately followed by "for an amount of", it kept
+        expanding past it and swallowed "Issue Structure" and
+        everything after it into the grade.
+        """
+        text = (
+            'For further details in relation to the Minimum Subscription, '
+            'Basis of Allotment, Interest, Redemption Amount & Eligible '
+            'Investors of the NCDs, please see “Issue Structure” on '
+            'page 76. \nCREDIT RATING \nThe NCDs proposed to be issued under '
+            'the Issue have been rated “ACUITE AA | Stable” for an '
+            'amount of ₹20,000.00 million by Acuite Ratings & Research '
+            'Limited vide its rating letter dated March 19, 2026, and press '
+            'release for rating rationale dated March \n19, 2026.'
+        )
+
+        items = de.extract_rating_letter_items(text)
+
+        assert len(items) == 1
+        assert items[0]["rating"] == "ACUITE AA | Stable"
+        assert "Issue Structure" not in items[0]["rating"]

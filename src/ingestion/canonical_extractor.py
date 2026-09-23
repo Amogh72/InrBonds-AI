@@ -110,13 +110,27 @@ def classify_coupon_type(frequency_raw_value: Optional[str]) -> str:
 
 
 def normalize_category_name(category_id: str) -> str:
-    names = {
-        "I_II": "Category I and Category II",
-        "III": "Category III",
-        "IV": "Category IV",
-    }
+    """
+    category_id is table_extractor.extract_category()'s output: one
+    or more Roman numerals joined by "_" (e.g. "III", "I_II",
+    "I_II_III_IV"), in whatever combination the source document's
+    row label actually named. Built generically from that list
+    rather than a fixed lookup, so any combination is covered, not
+    just the ones seen in past documents.
+    """
 
-    return names.get(category_id, category_id)
+    if not category_id:
+        return category_id
+
+    numerals = category_id.split("_")
+
+    if len(numerals) == 1:
+        return f"Category {numerals[0]}"
+
+    if len(numerals) == 2:
+        return f"Category {numerals[0]} and Category {numerals[1]}"
+
+    return "Category " + ", ".join(numerals[:-1]) + f" and {numerals[-1]}"
 
 
 # =========================================================

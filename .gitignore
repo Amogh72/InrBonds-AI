@@ -45,6 +45,7 @@ data/processed/
 data/raw/*.pdf
 !data/raw/pfc_ncd_2026.pdf
 !data/raw/iifl_wealth_prime_2023.pdf
+!data/raw/capri_global_ncd_2026.pdf
 
 # Jupyter
 .ipynb_checkpoints/

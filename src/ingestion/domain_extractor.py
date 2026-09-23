@@ -1315,27 +1315,82 @@ def _clean_rating_grade_block(raw_block):
 # generous but finite length as defense in depth, so a document
 # using neither expected phrasing fails to match cleanly rather
 # than running away across the page.
+#
+# Agency names occasionally join words with a bare connector -
+# "Acuite Ratings & Research Limited", "Infomerics Valuation and
+# Rating Limited" - and neither "&" nor "and" is itself
+# capitalized, so each needs its own alternative inside the
+# repeated word group rather than relying on the leading-capital
+# rule that covers every other word.
+RATING_AGENCY_NAME_PATTERN = (
+    r"[A-Z][\w.&-]*(?:\s+(?:[A-Z][\w.&-]*|&|(?i:and))){0,5}?"
+)
+
+# The grade's inner content excludes every quote character, not
+# just the pair it started with, so a candidate opening quote can
+# only ever pair with its OWN nearest closing quote. Without this,
+# a lazy `.` (which happily crosses other quote characters under
+# DOTALL) can be forced to skip an unrelated, closer quoted phrase
+# and latch onto a later one instead, whenever something follows
+# the near closing quote that the pattern also requires to match
+# (confirmed against a third real prospectus, where an unrelated
+# earlier quoted cross-reference - "Issue Structure" - sat right
+# before the real rating grade on the same page, and the ALT
+# pattern's own trailing "for an amount of" requirement pulled the
+# match back to start at that earlier quote instead).
+RATING_GRADE_PATTERN = (
+    r"[" + QUOTE_CHARS + r"](?P<grade>[^" + QUOTE_CHARS + r"]{2,150})[" + QUOTE_CHARS + r"]"
+)
+
 RATING_LETTER_PATTERN = re.compile(
     r"(?i:credit rating letter dated)\s+(?P<date>" + DATE_PATTERN + r").{0,250}?"
-    r"(?i:by)\s+(?P<agency>[A-Z][\w.&-]*(?:\s+[A-Z][\w.&-]*){0,3}?)\s+"
+    r"(?i:by)\s+(?P<agency>" + RATING_AGENCY_NAME_PATTERN + r")\s+"
     r"(?i:assigning a rating of)\s*"
-    r"[" + QUOTE_CHARS + r"](?P<grade>.{2,150}?)[" + QUOTE_CHARS + r"]",
+    + RATING_GRADE_PATTERN,
+    re.DOTALL,
+)
+
+# A second, structurally distinct convention (confirmed against a
+# third real prospectus): "have been rated "<grade>" for an amount
+# of <amount> by <agency> vide its rating letter dated <date>".
+# Unlike RATING_LETTER_PATTERN, the word "rated" only precedes the
+# FIRST item in a list of several - later items are joined with
+# "and" and drop it entirely - so the grade can't be anchored to
+# "rated" itself. Instead the grade is anchored to the quoted text
+# immediately before "for an amount of", which every item repeats.
+RATING_LETTER_PATTERN_ALT = re.compile(
+    RATING_GRADE_PATTERN + r"\s*"
+    r"(?i:for an amount of)\s+.{0,80}?\s+"
+    r"(?i:by)\s+(?P<agency>" + RATING_AGENCY_NAME_PATTERN + r")\s+"
+    r"(?i:vide its rating letter dated)\s+(?P<date>" + DATE_PATTERN + r")",
     re.DOTALL,
 )
 
 
 def extract_rating_letter_items(text):
     """
-    Extract individually-itemized credit rating letters (see
-    RATING_LETTER_PATTERN). Returns a list of dicts:
+    Extract individually-itemized credit rating letters, trying
+    both known real-world phrasings (RATING_LETTER_PATTERN and
+    RATING_LETTER_PATTERN_ALT). Returns a list of dicts:
         {agency, rating, outlook, rating_date, source_text}
     Never merges two agencies' ratings into one item - each
-    regex match is one agency's one rating letter.
+    regex match is one agency's one rating letter. A document
+    only ever uses one convention, but matches from both patterns
+    are still merged and ordered by where they appear, so nothing
+    depends on which pattern happens to run first.
     """
+
+    matches = []
+
+    for pattern in (RATING_LETTER_PATTERN, RATING_LETTER_PATTERN_ALT):
+        for match in pattern.finditer(text):
+            matches.append(match)
+
+    matches.sort(key=lambda match: match.start())
 
     results = []
 
-    for match in RATING_LETTER_PATTERN.finditer(text):
+    for match in matches:
 
         core, outlook = _clean_rating_grade_block(match.group("grade"))
 
