@@ -350,20 +350,103 @@ def estimate_page_offset(toc_entries, candidates, similarity_threshold=0.80):
 # STEP 5 — RECONCILE VISIBLE TOC WITH BODY (no embedded outline case)
 # ---------------------------------------------------------
 
+def _best_candidate_for_entry(
+    entry, candidates, expected_pdf_page, page_tolerance, claimed_ids,
+):
+    """
+    Score every layout candidate within the page window against this
+    TOC entry's title, tracking the best UNCLAIMED match and the best
+    match overall (ties broken by proximity to the expected page,
+    not iteration order) separately. The overall best is kept even
+    when it scores below the caller's similarity threshold, purely so
+    resolve_sections can still report a near-miss similarity score
+    for an unconfirmed entry, matching prior behavior.
+
+    Returns (best_unclaimed_candidate_or_None, its_score,
+             best_overall_candidate_or_None, its_score).
+    """
+
+    best_unclaimed, unclaimed_score, unclaimed_distance = None, 0, None
+    best_overall, overall_score, overall_distance = None, 0, None
+
+    for candidate in candidates:
+
+        distance = abs(candidate["page_number"] - expected_pdf_page)
+
+        if distance > page_tolerance:
+            continue
+
+        score = similarity(entry["title"], candidate["text"])
+
+        if (
+            best_overall is None
+            or score > overall_score
+            or (score == overall_score and distance < overall_distance)
+        ):
+            best_overall, overall_score, overall_distance = (
+                candidate, score, distance
+            )
+
+        if id(candidate) in claimed_ids:
+            continue
+
+        if (
+            best_unclaimed is None
+            or score > unclaimed_score
+            or (score == unclaimed_score and distance < unclaimed_distance)
+        ):
+            best_unclaimed, unclaimed_score, unclaimed_distance = (
+                candidate, score, distance
+            )
+
+    return best_unclaimed, unclaimed_score, best_overall, overall_score
+
+
 def resolve_sections(toc_entries, candidates, page_offset, page_tolerance=3, similarity_threshold=0.65):
+    """
+    A visible-TOC entry's title is not always unique within the
+    document - some prospectuses print an identically-titled heading
+    on several consecutive pages (e.g. a separate "DECLARATION" page
+    per signing director). Matching purely on best similarity score
+    within the page window, with no memory of what earlier entries
+    already matched, collapses every such entry onto the SAME single
+    best-scoring candidate (confirmed against a real second
+    prospectus: 4 consecutive "DECLARATION" TOC entries, each with
+    its own distinct heading on pages 194-197, all resolved to page
+    194). Tracking claimed candidates and preferring an unclaimed one
+    fixes this without weakening matching for the (far more common)
+    case of a uniquely-titled entry, which is unaffected either way.
+    """
     resolved = []
+    claimed_ids = set()
+
     for entry in toc_entries:
         expected_pdf_page = entry["printed_page"] + page_offset
-        best_candidate, best_score = None, 0
 
-        for candidate in candidates:
-            if abs(candidate["page_number"] - expected_pdf_page) > page_tolerance:
-                continue
-            score = similarity(entry["title"], candidate["text"])
-            if score > best_score:
-                best_score, best_candidate = score, candidate
+        best_unclaimed, unclaimed_score, best_overall, overall_score = (
+            _best_candidate_for_entry(
+                entry, candidates, expected_pdf_page, page_tolerance,
+                claimed_ids,
+            )
+        )
+
+        if best_unclaimed is not None and unclaimed_score >= similarity_threshold:
+            # An unclaimed match good enough to confirm - always
+            # preferred, so a repeated title spreads across its
+            # distinct physical occurrences instead of collapsing.
+            best_candidate, best_score = best_unclaimed, unclaimed_score
+        else:
+            # Nothing new clears the bar; fall back to the overall
+            # best match (possibly already claimed, possibly below
+            # threshold) - identical to this function's behavior
+            # before claim-tracking existed.
+            best_candidate, best_score = best_overall, overall_score
 
         confirmed = best_candidate is not None and best_score >= similarity_threshold
+
+        if confirmed:
+            claimed_ids.add(id(best_candidate))
+
         resolved.append({
             "level": entry.get("level", 1),
             "title": entry["title"],
@@ -555,83 +638,91 @@ def save_json(data, path):
 # MAIN — evidence-priority orchestration
 # ---------------------------------------------------------
 
-if __name__ == "__main__":
+# An embedded outline that mostly fails cross-validation isn't a
+# slightly-noisy version of the truth -- it's evidence this outline
+# doesn't belong to this document's actual structure (e.g. stale
+# bookmarks carried over from merging source PDFs together). Below
+# this trust threshold we don't use it as the primary source at all.
+EMBEDDED_TRUST_THRESHOLD = 0.30
 
-    print("\nLoading document layout...")
-    document = load_layout_json(LAYOUT_JSON)
+
+def detect_structure(pdf_path, document, verbose=True):
+    """
+    Run the full evidence-priority structure-detection pipeline
+    against one already-parsed layout document (see pdf_parser.py),
+    and return the resulting structure dict - the same shape
+    previously only produced by running this file as a script.
+    Callable directly by other pipeline stages (e.g. a future
+    chunker) without going through a file on disk.
+    """
+
+    def log(message):
+        if verbose:
+            print(message)
+
     total_pages = document["total_pages"]
 
-    print("Checking embedded PDF outline...")
-    embedded_toc = extract_embedded_toc(PDF_PATH)
-    print(f"Embedded TOC entries: {len(embedded_toc)}")
+    log("Checking embedded PDF outline...")
+    embedded_toc = extract_embedded_toc(pdf_path)
+    log(f"Embedded TOC entries: {len(embedded_toc)}")
 
-    print("Extracting visible Table of Contents (always attempted)...")
+    log("Extracting visible Table of Contents (always attempted)...")
     visible_toc = extract_visible_toc(document)
 
     if visible_toc:
-        visible_toc = infer_toc_levels(
-            visible_toc
-        )
+        visible_toc = infer_toc_levels(visible_toc)
 
-    print(f"Visible TOC entries: {len(visible_toc)}")
+    log(f"Visible TOC entries: {len(visible_toc)}")
 
-    print("Generating layout heading candidates (verification signal)...")
+    log("Generating layout heading candidates (verification signal)...")
     candidates = find_heading_candidates(document)
-    print(f"Layout candidates: {len(candidates)}")
-
-    # An embedded outline that mostly fails cross-validation isn't a
-    # slightly-noisy version of the truth -- it's evidence this outline
-    # doesn't belong to this document's actual structure (e.g. stale
-    # bookmarks carried over from merging source PDFs together). Below
-    # this trust threshold we don't use it as the primary source at all.
-    EMBEDDED_TRUST_THRESHOLD = 0.30
+    log(f"Layout candidates: {len(candidates)}")
 
     use_embedded = False
     validated_sections = None
     confirmed_ratio = None
 
     if embedded_toc:
-        print("\nCross-validating embedded outline against visible TOC + layout...")
+        log("\nCross-validating embedded outline against visible TOC + layout...")
         sections_with_boundaries = add_hierarchical_boundaries(embedded_toc, total_pages)
         validated_sections = cross_validate_embedded(sections_with_boundaries, visible_toc, candidates)
 
         low_conf = [s for s in validated_sections if s["confidence"] == "low"]
         confirmed_ratio = 1 - (len(low_conf) / len(validated_sections))
-        print(f"{len(validated_sections)} sections total, {len(low_conf)} flagged low-confidence "
-              f"({confirmed_ratio:.0%} confirmed)")
+        log(f"{len(validated_sections)} sections total, {len(low_conf)} flagged low-confidence "
+            f"({confirmed_ratio:.0%} confirmed)")
 
         if confirmed_ratio >= EMBEDDED_TRUST_THRESHOLD:
             use_embedded = True
         else:
-            print(f"Confirmed ratio {confirmed_ratio:.0%} is below the "
-                  f"{EMBEDDED_TRUST_THRESHOLD:.0%} trust threshold -- the embedded "
-                  f"outline does not reliably describe this document. "
-                  f"Falling back instead of using it as primary.")
+            log(f"Confirmed ratio {confirmed_ratio:.0%} is below the "
+                f"{EMBEDDED_TRUST_THRESHOLD:.0%} trust threshold -- the embedded "
+                f"outline does not reliably describe this document. "
+                f"Falling back instead of using it as primary.")
 
     if use_embedded:
-        structure = {
+        return {
             "document": document["document"],
             "strategy": "embedded_pdf_outline_validated",
             "confirmed_ratio": round(confirmed_ratio, 3),
             "visible_toc_available": bool(visible_toc),
             "sections": validated_sections,
         }
-        save_json(structure, OUTPUT_JSON)
 
-    elif visible_toc:
-        print("\nUsing visible TOC + layout confirmation as primary source...")
+    if visible_toc:
+        log("\nUsing visible TOC + layout confirmation as primary source...")
 
         page_offset = estimate_page_offset(visible_toc, candidates)
-        print(f"Estimated page offset: {page_offset:+d}")
+        log(f"Estimated page offset: {page_offset:+d}")
 
         resolved = resolve_sections(visible_toc, candidates, page_offset)
         for section in resolved:
             status = "✓" if section["confirmed"] else "?"
-            print(f"{status} PDF {section['resolved_pdf_page']:>3} | {section['title']}")
+            log(f"{status} PDF {section['resolved_pdf_page']:>3} | {section['title']}")
 
         boundaries = build_section_boundaries(resolved, total_pages)
 
-        structure = {
+        return {
             "document": document["document"],
             "strategy": "visible_toc_plus_layout",
             "embedded_toc_rejected": bool(embedded_toc),
@@ -640,17 +731,24 @@ if __name__ == "__main__":
             "toc_entries": visible_toc,
             "sections": boundaries,
         }
-        save_json(structure, OUTPUT_JSON)
 
-    else:
-        print("\nNo embedded outline or visible TOC usable. Falling back to conservative layout-only structure.")
+    log("\nNo embedded outline or visible TOC usable. Falling back to conservative layout-only structure.")
 
-        conservative = build_conservative_layout_structure(candidates, total_pages)
-        structure = {
-            "document": document["document"],
-            "strategy": "layout_only_conservative",
-            "sections": conservative,
-        }
-        save_json(structure, OUTPUT_JSON)
+    conservative = build_conservative_layout_structure(candidates, total_pages)
 
+    return {
+        "document": document["document"],
+        "strategy": "layout_only_conservative",
+        "sections": conservative,
+    }
+
+
+if __name__ == "__main__":
+
+    print("\nLoading document layout...")
+    _document = load_layout_json(LAYOUT_JSON)
+
+    _structure = detect_structure(PDF_PATH, _document, verbose=True)
+
+    save_json(_structure, OUTPUT_JSON)
     print(f"\nSaved structure to: {OUTPUT_JSON}")
