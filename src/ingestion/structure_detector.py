@@ -618,6 +618,16 @@ def build_conservative_layout_structure(candidates, total_pages, top_n=40):
         end_page = chosen[i + 1]["page_number"] - 1 if i + 1 < len(chosen) else total_pages
         end_page = max(start_page, end_page)
         result.append({
+            # Both other strategies' sections carry a "level" (from
+            # the embedded outline or the visible TOC's inferred
+            # indentation) - chunker.py's is_leaf_section() requires
+            # it on every section. This tier has no real hierarchy
+            # signal to derive one from, so every section is flat,
+            # level 1 - simply having the key, rather than omitting
+            # it, is what keeps this path usable by the chunker
+            # instead of crashing with a KeyError the first time a
+            # document hits this fallback.
+            "level": 1,
             "title": cand["text"],
             "start_page": start_page,
             "end_page": end_page,

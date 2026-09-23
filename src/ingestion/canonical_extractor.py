@@ -31,8 +31,10 @@ from schema.canonical_schema import (
 )
 
 from ingestion.table_extractor import extract_series_terms
+from ingestion import chunker
 from ingestion import pdf_parser
 from ingestion import domain_extractor
+from ingestion import structure_detector
 
 
 # =========================================================
@@ -973,6 +975,63 @@ def generate_structured_fact_chunks(document: BondDocument) -> List[Chunk]:
 
 
 # =========================================================
+# PROSE CHUNK GENERATION
+#
+# Reuses structure_detector.py + chunker.py as-is (both already
+# validated against both fixture documents) rather than a competing
+# extraction system. Two things needed fixing before this could be
+# merged into the same canonical JSON as structured_fact chunks - see
+# chunker.py's create_chunks() and collect_section_pages() docstrings
+# for the document_id-consistency and table-page-exclusion fixes.
+# =========================================================
+
+def generate_prose_chunks(
+    pdf_path: Path,
+    layout_document: Dict[str, Any],
+    document_id: str,
+    table_pages: set,
+) -> List[Chunk]:
+    """
+    One "prose" Chunk per structure_detector-identified leaf section
+    window (Risk Factors, Objects of the Issue, covenants, etc.) -
+    the free-text content structured_fact chunks can't cover, since
+    none of it is modeled as a Fact anywhere in this schema.
+
+    table_pages are excluded from chunking here: those pages already
+    have a clean, structured extraction (table_extractor.py's series
+    table), and re-chunking their raw line text would just be an
+    out-of-order restatement of the same data, likely to read as
+    garbled since a table's cells don't reconstruct into prose.
+    """
+
+    structure = structure_detector.detect_structure(
+        pdf_path, layout_document, verbose=False
+    )
+
+    raw_chunks = chunker.create_chunks(
+        layout_document,
+        structure,
+        document_id=document_id,
+        excluded_pages=table_pages,
+    )
+
+    return [
+        Chunk(
+            chunk_id=raw["chunk_id"],
+            chunk_type="prose",
+            text=raw["text"],
+            start_page=raw["start_page"],
+            end_page=raw["end_page"],
+            section_path=raw["section_path"],
+            provenance=[
+                make_provenance(document_id, raw["start_page"])
+            ],
+        )
+        for raw in raw_chunks
+    ]
+
+
+# =========================================================
 # DOCUMENT EXTRACTION
 # =========================================================
 
@@ -993,6 +1052,9 @@ def extract_canonical_document(
 
     if document_name is None:
         document_name = pdf_path.name
+
+    if layout_document is None:
+        layout_document = pdf_parser.parse_pdf_with_layout(pdf_path)
 
     # -----------------------------------------------------
     # 1. Existing geometry-aware table extraction
@@ -1221,13 +1283,20 @@ def extract_canonical_document(
     )
 
     # -----------------------------------------------------
-    # 10. Structured-fact chunks, derived from the Facts already
-    #     assembled above - see generate_structured_fact_chunks'
-    #     docstring. Prose chunks (from chunker.py) are not merged
-    #     in yet; see Chunk's docstring in canonical_schema.py.
+    # 10. Chunks: structured_fact (derived from the Facts just
+    #     assembled above) and prose (from structure_detector.py +
+    #     chunker.py, excluding pages already covered by the series
+    #     table). One combined list, per Chunk's docstring in
+    #     canonical_schema.py.
     # -----------------------------------------------------
 
-    canonical.chunks = generate_structured_fact_chunks(canonical)
+    table_pages = {t["page"] for t in tables_found}
+
+    canonical.chunks = generate_structured_fact_chunks(canonical) + (
+        generate_prose_chunks(
+            pdf_path, layout_document, document_id, table_pages
+        )
+    )
 
     return validate_canonical_document(canonical)
 
