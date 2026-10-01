@@ -66,9 +66,17 @@ docker compose up -d    # starts MySQL, Qdrant, Neo4j locally
 
 ### Load real data
 
-This reads directly from the pipeline's canonical JSON output — run
-the main pipeline first (see the repo root README) to produce
-`data/processed/pfc_ncd_2026.json` (or any other document), then:
+This reads directly from the pipeline's canonical JSON output.
+`data/processed/` is gitignored (it's a generated artifact, not source),
+so a fresh clone won't have `pfc_ncd_2026.json` — generate it first:
+
+```bash
+cd ..   # repo root
+python -m src.ingestion.canonical_extractor data/raw/pfc_ncd_2026.pdf --document-id pfc_ncd_2026 --output data/processed/pfc_ncd_2026.json
+cd mcp_server
+```
+
+then:
 
 ```bash
 python scripts/setup_qdrant_collection.py
@@ -167,6 +175,28 @@ invoke for a given question.
   to the LLM.
 - Results are truncated with a `truncated: true` flag rather than
   silently dropped.
+
+## Troubleshooting
+
+- **MySQL "Lost connection during handshake" right after `docker compose up -d`
+  on a fresh volume.** MySQL's container actually restarts itself partway
+  through first-time init (it boots a temporary instance to run
+  `sql/schema.sql`, then shuts down and starts the real server) — connecting
+  during that restart window drops the handshake. Check
+  `docker compose logs mysql` for `ready for connections` appearing a
+  *second* time before running the loaders, or just wait ~30-45s.
+- **MySQL container name conflict on `docker compose up -d`.** A container
+  from an earlier attempt is still registered under the same name. To start
+  genuinely clean (also fixes stale/mismatched passwords from a half-finished
+  earlier init): `docker compose down -v` (the `-v` removes the named
+  volumes too — without it, a recreated container reuses the old,
+  already-initialized data directory and `sql/schema.sql` never re-runs).
+- **`load_canonical_to_mysql.py` connects as the wrong user, or with an
+  empty password.** It reads `SQL_*` through `config.py`
+  (`python-dotenv`-backed) like the other two loaders, so `.env` should
+  apply automatically — but if `.env` doesn't exist yet (only
+  `.env.example` does), `config.py`'s dataclass defaults (`root`, empty
+  password) are the fallback. Run `cp .env.example .env` first.
 
 ## Current limitations
 

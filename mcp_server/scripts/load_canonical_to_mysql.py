@@ -26,19 +26,31 @@ load_canonical_to_qdrant.py / load_canonical_to_neo4j.py for those.
 import argparse
 import json
 import logging
-import os
 import sys
 from pathlib import Path
 
 import mysql.connector
 from mysql.connector import Error
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-DB_HOST = os.getenv("SQL_HOST", "localhost")
-DB_PORT = int(os.getenv("SQL_PORT", "3306"))
-DB_USER = os.getenv("SQL_USER", "root")
-DB_PASSWORD = os.getenv("SQL_PASSWORD", "")
-DB_NAME = os.getenv("SQL_DATABASE", "inrbonds")
+# Reuse config.py's sql_config (which calls load_dotenv()) instead of
+# reading os.getenv() directly, like the original version of this
+# script did - that meant editing .env had zero effect on this loader
+# specifically, even though the other two loaders (which import
+# qdrant_config/neo4j_config from the same config.py) already picked
+# up .env correctly. A real credential mismatch this caused: the
+# loader silently fell back to its own root/"" defaults instead of
+# .env's mcp_readonly/changeme, so it either connected as the wrong
+# user or failed outright depending on what root's password happened
+# to be on a given machine.
+from config import sql_config  # noqa: E402
+
+DB_HOST = sql_config.host
+DB_PORT = sql_config.port
+DB_USER = sql_config.user
+DB_PASSWORD = sql_config.password
+DB_NAME = sql_config.database
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 logger = logging.getLogger("inrbonds.sql_loader")
