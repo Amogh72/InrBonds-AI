@@ -79,7 +79,11 @@ def main():
     check("Series IV and V both have 15-year tenor", {"IV", "V"}.issubset(series_codes), f"got {series_codes}")
 
     section("sql_search_bond_terms: Series III face value (zero coupon)")
-    result = server.sql_search_bond_terms(series_code="III")
+    # Scoped to PFC's document - once a second issuer is loaded, its own
+    # "Series III" is a different, unrelated series with different terms,
+    # and an unscoped query would return whichever one happens to sort
+    # first instead of the one this check actually means to assert on.
+    result = server.sql_search_bond_terms(series_code="III", document_name="pfc_ncd_2026.pdf")
     print(json.dumps(result, indent=2, default=str))
     if result["ok"] and result["data"]:
         face_value = result["data"][0].get("face_value_inr")
@@ -119,7 +123,20 @@ def main():
     # 4. sql_query — raw SQL fallback
     # -------------------------------------------------------------------
     section("sql_query: raw SELECT against series table")
-    result = server.sql_query("SELECT series_code, tenor FROM series ORDER BY series_code", citation_table="series")
+    # Scoped to PFC's document via a join - an unscoped `SELECT * FROM
+    # series` legitimately grows past 5 rows once a second document is
+    # loaded (13 = PFC's 5 + IIFL's 8), which isn't a bug, just no
+    # longer what this specific check is asserting about.
+    result = server.sql_query(
+        """
+        SELECT s.series_code, s.tenor FROM series s
+        JOIN issues iss ON s.issue_id = iss.issue_id
+        JOIN documents d ON iss.document_id = d.document_id
+        WHERE d.document_name = 'pfc_ncd_2026.pdf'
+        ORDER BY s.series_code
+        """,
+        citation_table="series",
+    )
     print(json.dumps(result, indent=2, default=str))
     check("sql_query returns 5 series rows", result["ok"] and result["row_count"] == 5, f"got {result.get('row_count')}")
 
