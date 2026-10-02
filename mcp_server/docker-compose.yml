@@ -1,0 +1,47 @@
+version: "3.8"
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: inrbonds-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpass_change_me
+      MYSQL_DATABASE: inrbonds
+      MYSQL_USER: mcp_readonly
+      MYSQL_PASSWORD: changeme
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./sql/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: inrbonds-qdrant
+    restart: unless-stopped
+    ports:
+      - "6333:6333"   # REST API
+      - "6334:6334"   # gRPC
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+  neo4j:
+    image: neo4j:5.20
+    container_name: inrbonds-neo4j
+    restart: unless-stopped
+    environment:
+      NEO4J_AUTH: neo4j/changeme
+      # No APOC plugin needed - the graph schema is a small fixed set
+      # of labels/relationship types now (see load_canonical_to_neo4j.py),
+      # not arbitrary runtime strings requiring apoc.merge.*.
+    ports:
+      - "7474:7474"   # Browser UI
+      - "7687:7687"   # Bolt protocol
+    volumes:
+      - neo4j_data:/data
+
+volumes:
+  mysql_data:
+  qdrant_data:
+  neo4j_data:
