@@ -5,9 +5,18 @@ All values are pulled from environment variables (see .env.example).
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv()
+# Explicit path, anchored to this file's own directory - NOT a bare
+# load_dotenv(), which auto-discovers .env by walking up from the
+# caller's stack frame. That works under a plain `python
+# scripts/foo.py` invocation, but breaks silently (finds nothing, no
+# error) under `uvicorn --reload`, whose reloader/watcher subprocess
+# disrupts the frame-walking trick - every *Config dataclass below
+# then falls back to its empty-string/default fallback instead of the
+# real .env value, with no indication anything went wrong.
+load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env")
 
 
 @dataclass(frozen=True)
