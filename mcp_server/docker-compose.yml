@@ -1,8 +1,7 @@
-version: "3.8"
-
 services:
   mysql:
     image: mysql:8.0
+    platform: linux/amd64
     container_name: inrbonds-mysql
     restart: unless-stopped
     environment:
@@ -18,6 +17,7 @@ services:
 
   qdrant:
     image: qdrant/qdrant:latest
+    platform: linux/amd64
     container_name: inrbonds-qdrant
     restart: unless-stopped
     ports:
@@ -28,6 +28,7 @@ services:
 
   neo4j:
     image: neo4j:5.20
+    platform: linux/amd64
     container_name: inrbonds-neo4j
     restart: unless-stopped
     environment:
