@@ -16,6 +16,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "vendor"))
 
 from llm_clients.anthropic_client import AnthropicClient  # noqa: E402
+from llm_clients.gemini_client import GeminiClient  # noqa: E402
 from pikerag.retrieval_types import AtomRetrievalInfo  # noqa: E402
 from pikerag.prompts.decomposition import (  # noqa: E402
     question_decompose_protocol,
@@ -40,6 +41,28 @@ class TestAnthropicMessageTranslation:
         system_prompt, chat = AnthropicClient._split_system_and_messages(messages)
         assert system_prompt == ""
         assert chat == [{"role": "user", "content": "hello"}]
+
+
+class TestGeminiMessageTranslation:
+
+    def test_system_message_extracted_separately(self):
+        messages = [{"role": "system", "content": "sys prompt"}, {"role": "user", "content": "hello"}]
+        system_prompt, contents = GeminiClient._split_system_and_messages(messages)
+        assert system_prompt == "sys prompt"
+        assert len(contents) == 1
+        assert contents[0].role == "user"
+        assert contents[0].parts[0].text == "hello"
+
+    def test_assistant_role_becomes_model(self):
+        messages = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello back"}]
+        _, contents = GeminiClient._split_system_and_messages(messages)
+        assert [c.role for c in contents] == ["user", "model"]
+
+    def test_no_system_message_gives_empty_string(self):
+        messages = [{"role": "user", "content": "hello"}]
+        system_prompt, contents = GeminiClient._split_system_and_messages(messages)
+        assert system_prompt == ""
+        assert len(contents) == 1
 
 
 class TestChunkLabel:

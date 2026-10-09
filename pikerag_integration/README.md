@@ -66,7 +66,7 @@ cd pikerag_integration
 python -m venv .venv
 source .venv/bin/activate   # Windows: .venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-cp .env.example .env   # fill in ANTHROPIC_API_KEY
+cp .env.example .env   # fill in ANTHROPIC_API_KEY or GEMINI_API_KEY (see below)
 ```
 
 Requires `mcp_server/.env` already set up and Qdrant reachable (`docker
@@ -75,11 +75,33 @@ loaded via `mcp_server/scripts/load_canonical_to_qdrant.py` (or the
 `upload_service/` UI) - this component only reads from Qdrant, it doesn't
 load anything itself.
 
+### LLM provider: Anthropic (default) or Gemini (free tier)
+
+The decomposition loop talks to whatever implements `vendor/pikerag/
+llm_client/base.py`'s `BaseLLMClient` interface - two implementations ship
+here:
+
+- `llm_clients/anthropic_client.py` (Claude, via the Anthropic Messages API)
+- `llm_clients/gemini_client.py` (Gemini, via Google's `google-genai` SDK)
+
+Anthropic's API has no free tier; Gemini's Flash models do (get a key at
+[aistudio.google.com](https://aistudio.google.com) - check current
+free-tier model availability there, it changes). Pick one with `--provider`
+or `LLM_PROVIDER` in `.env`:
+
+```bash
+python cli.py "..." --provider gemini   # or set LLM_PROVIDER=gemini in .env
+```
+
+Only the chosen provider's API key needs to be set; the other can stay
+empty in `.env`.
+
 ## Run
 
 ```bash
 python cli.py "What is PFC's Series III coupon?"
 python cli.py "Compare PFC's and IIFL's debenture trustee" --show-trace
+python cli.py "What is PFC's Series III coupon?" --provider gemini
 ```
 
 `--show-trace` prints the full decompose/retrieve/select trace for every
