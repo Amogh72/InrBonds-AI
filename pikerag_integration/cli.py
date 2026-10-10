@@ -55,7 +55,8 @@ def main() -> None:
                          help="Which LLM backs the decomposition loop. Gemini has a free API tier; Anthropic's does not.")
     parser.add_argument("--model", default=None, help="Defaults to a sensible model for --provider if omitted.")
     parser.add_argument("--max-sub-questions", type=int, default=DEFAULT_MAX_SUB_QUESTIONS)
-    parser.add_argument("--max-tokens", type=int, default=2048)
+    parser.add_argument("--max-tokens", type=int, default=4096,
+                         help="2048 was seen truncating a selection step's reasoning mid-JSON on a multi-document comparison question (more retrieved candidates to reason over than a single-document question).")
     parser.add_argument("--show-trace", action="store_true", help="Print the full decomposition trace, not just the final answer.")
     args = parser.parse_args()
 
