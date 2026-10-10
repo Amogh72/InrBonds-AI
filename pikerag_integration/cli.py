@@ -32,7 +32,7 @@ from orchestrator import DecompositionOrchestrator, DEFAULT_MAX_SUB_QUESTIONS  #
 
 PROVIDER_DEFAULTS = {
     "anthropic": "claude-sonnet-5",
-    "gemini": "gemini-2.5-flash",
+    "gemini": "gemini-3.8-flash",
 }
 
 

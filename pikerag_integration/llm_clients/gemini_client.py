@@ -35,7 +35,7 @@ class GeminiClient(BaseLLMClient):
             module_path: pikerag_integration.llm_clients.gemini_client
             class_name: GeminiClient
             args: { api_key: <your_api_key> }
-            llm_config: { model: gemini-2.5-flash, temperature: 0, max_tokens: 2048 }
+            llm_config: { model: gemini-3.8-flash, temperature: 0, max_tokens: 2048 }
     """
 
     NAME = "GeminiClient"
@@ -73,7 +73,7 @@ class GeminiClient(BaseLLMClient):
     def _get_response_with_messages(self, messages: List[dict], **llm_config) -> Any:
         system_instruction, contents = self._split_system_and_messages(messages)
 
-        model = llm_config.get("model", "gemini-2.5-flash")
+        model = llm_config.get("model", "gemini-3.8-flash")
         config = types.GenerateContentConfig(
             system_instruction=system_instruction or None,
             temperature=llm_config.get("temperature"),
