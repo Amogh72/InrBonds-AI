@@ -38,6 +38,33 @@ DEFAULT_MAX_OUTPUT_TOKENS = 2048
 _MARKDOWN_FENCE_RE = re.compile(r"^```(?:json)?\s*\n?(.*?)\n?```\s*$", re.DOTALL)
 
 
+class GeminiDailyQuotaExhausted(RuntimeError):
+    """
+    Raised instead of silently returning empty content when Gemini's
+    free-tier DAILY (not per-minute) quota is exhausted. BaseLLMClient's
+    generate_content_with_messages() (vendor/pikerag/llm_client/base.py)
+    treats a None response as "" content with just a warning, not an
+    exception - which downstream turns into a confusing JSON-parse failure
+    ("Expecting value: line 1 column 1") with no indication of the real
+    cause. Raising here instead gives orchestrator.py/query_service's
+    caller a clear, specific error to show instead.
+    """
+
+
+def _is_daily_quota_exhaustion(exc: ClientError) -> bool:
+    """
+    True if this 429's quota violation is a per-DAY limit (quotaId like
+    "GenerateRequestsPerDayPerProjectPerModel-FreeTier", seen live) rather
+    than a short-lived per-minute one - the only distinction that matters
+    for whether retrying is worth attempting at all, since a per-day quota
+    cannot recover within this client's retry window (minutes, not hours).
+    A substring check rather than precise structure navigation, since the
+    exact error JSON shape isn't documented and this only needs to be
+    right, not strict.
+    """
+    return "PerDay" in str(exc)
+
+
 class GeminiClient(BaseLLMClient):
     """
     yml-style config (matching the pattern every other PIKE-RAG client
@@ -98,7 +125,23 @@ class GeminiClient(BaseLLMClient):
                 response = self._client.models.generate_content(model=model, contents=contents, config=config)
                 break
             except ClientError as exc:
-                if getattr(exc, "code", None) == 429:  # rate limit - worth retrying
+                if getattr(exc, "code", None) == 429 and _is_daily_quota_exhaustion(exc):
+                    # A per-day quota (seen live: quotaId
+                    # "GenerateRequestsPerDayPerProjectPerModel-FreeTier",
+                    # Google's own error suggesting a retry in ~17 hours)
+                    # cannot possibly recover within this loop's retry
+                    # window (at most max_attempt * unit_wait_time, minutes
+                    # not hours) - retrying it anyway just burns the
+                    # question's full timeout silently, with nothing to
+                    # show for it. Fail fast instead; a per-minute rate
+                    # limit (below) is the only 429 actually worth retrying.
+                    self.warning(f"  Daily quota exhausted, not retrying (would need hours, not minutes): {exc}")
+                    raise GeminiDailyQuotaExhausted(
+                        "Gemini free-tier daily quota exhausted for this model. It will not recover "
+                        "within minutes - wait for the daily reset, pass --model with a different "
+                        "Gemini model, or use --provider anthropic instead."
+                    ) from exc
+                elif getattr(exc, "code", None) == 429:  # short-lived rate limit - worth retrying
                     self.warning(f"  Failed due to RateLimitError: {exc}")
                     num_attempt += 1
                     self._wait(num_attempt)

@@ -15,8 +15,10 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "vendor"))
 
+from google.genai.errors import ClientError  # noqa: E402
+
 from llm_clients.anthropic_client import AnthropicClient  # noqa: E402
-from llm_clients.gemini_client import GeminiClient  # noqa: E402
+from llm_clients.gemini_client import GeminiClient, GeminiDailyQuotaExhausted, _is_daily_quota_exhaustion  # noqa: E402
 from pikerag.retrieval_types import AtomRetrievalInfo  # noqa: E402
 from pikerag.prompts.decomposition import (  # noqa: E402
     question_decompose_protocol,
@@ -93,6 +95,57 @@ class TestGeminiMarkdownFenceStripping:
     def test_leaves_unfenced_content_unchanged(self):
         content = self._client()._get_content_from_response(self._FakeResponse('{"a": 1}'))
         assert content == '{"a": 1}'
+
+
+class TestGeminiDailyQuotaDetection:
+    """
+    Seen live: a daily free-tier quota exhaustion (quotaId
+    "GenerateRequestsPerDayPerProjectPerModel-FreeTier") was retried 5
+    times with increasing backoff (up to ~15 minutes total) by the generic
+    429-is-worth-retrying path, when it can't possibly recover within that
+    window - only a full daily reset (hours away) fixes it. These confirm
+    the daily-vs-per-minute distinction is read correctly from a realistic
+    error shape, since that's what decides whether retrying even happens.
+    """
+
+    def _quota_error(self, quota_id: str) -> ClientError:
+        return ClientError(code=429, response_json={
+            "error": {
+                "code": 429, "message": "You exceeded your current quota...", "status": "RESOURCE_EXHAUSTED",
+                "details": [{
+                    "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+                    "violations": [{"quotaId": quota_id}],
+                }],
+            },
+        })
+
+    def test_per_day_quota_is_detected(self):
+        exc = self._quota_error("GenerateRequestsPerDayPerProjectPerModel-FreeTier")
+        assert _is_daily_quota_exhaustion(exc) is True
+
+    def test_per_minute_quota_is_not_flagged_as_daily(self):
+        exc = self._quota_error("GenerateRequestsPerMinutePerProjectPerModel-FreeTier")
+        assert _is_daily_quota_exhaustion(exc) is False
+
+    def test_daily_quota_exhaustion_raises_immediately_without_retrying(self, monkeypatch):
+        import time as time_module
+
+        client = GeminiClient(api_key="fake-key-for-offline-test")
+        monkeypatch.setattr(
+            client._client.models, "generate_content",
+            lambda **kwargs: (_ for _ in ()).throw(self._quota_error("GenerateRequestsPerDayPerProjectPerModel-FreeTier")),
+        )
+        # If this ever retried, it would call time.sleep() via BaseLLMClient._wait() -
+        # failing that assertion is a faster, clearer signal than letting a
+        # regression here actually sleep for minutes during a test run.
+        monkeypatch.setattr(time_module, "sleep", lambda _seconds: (_ for _ in ()).throw(
+            AssertionError("should not retry/sleep on a daily quota exhaustion")))
+
+        try:
+            client._get_response_with_messages([{"role": "user", "content": "hi"}], model="gemini-3.8-flash")
+            assert False, "expected GeminiDailyQuotaExhausted to be raised"
+        except GeminiDailyQuotaExhausted:
+            pass
 
 
 class TestChunkLabel:

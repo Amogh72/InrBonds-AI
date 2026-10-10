@@ -77,6 +77,17 @@ class AnthropicClient(BaseLLMClient):
         request_kwargs = dict(llm_config)
         request_kwargs.setdefault("max_tokens", DEFAULT_MAX_TOKENS)
         request_kwargs.pop("cache_config", None)  # BaseLLMClient's own concept, not an Anthropic API param
+        # anthropic>=1.0's Messages.create() dropped `temperature` as a
+        # top-level sampling parameter entirely - it's been replaced by an
+        # `effort` setting (low/medium/high/xhigh/max) nested under
+        # `output_config`, a different concept (reasoning depth, not
+        # sampling randomness) with no honest 1:1 mapping from a numeric
+        # temperature. Every caller here (orchestrator.py via cli.py/
+        # query_service/app.py) passes temperature=0 for deterministic,
+        # structured-JSON output - dropping it rather than guessing at an
+        # effort-level substitute is the honest choice until a caller
+        # actually wants to tune this.
+        request_kwargs.pop("temperature", None)
 
         response = None
         num_attempt = 0
@@ -96,6 +107,14 @@ class AnthropicClient(BaseLLMClient):
             except anthropic.BadRequestError as exc:
                 self.warning(f"  Failed due to Exception: {exc}")
                 self.warning("  Skip this request...")
+                break
+            except TypeError as exc:
+                # A bad argument to messages.create() (e.g. an SDK version
+                # that no longer accepts a parameter this code sends) is a
+                # code bug, not a transient failure - retrying identical
+                # arguments 5 times over several minutes can only ever fail
+                # the same way, so fail fast instead.
+                self.warning(f"  Failed due to TypeError (not retrying - this is a code bug, not transient): {exc}")
                 break
             except Exception as exc:  # noqa: BLE001 - mirror BaseLLMClient's other clients' broad retry
                 self.warning(f"  Failed due to Exception: {exc}")
