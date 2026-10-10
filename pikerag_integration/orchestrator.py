@@ -31,7 +31,7 @@ Each step, concretely:
 
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT / "pikerag_integration" / "vendor") not in sys.path:
@@ -109,19 +109,31 @@ class DecompositionOrchestrator:
         output.setdefault("response", content)
         return output
 
-    def answer(self, question: str) -> dict[str, Any]:
+    def answer(self, question: str, on_round: Callable[[int, str], None] | None = None) -> dict[str, Any]:
+        """
+        on_round(round_number, phase), if given, fires before each
+        LLM/retrieval step - purely a UI hook (query_service/app.py uses it
+        to post live status for a page polling a background job) since a
+        full answer() call can take minutes across several decomposition
+        rounds with no other signal of progress. Never affects control flow.
+        """
         trace: dict[str, dict] = {}
         chosen: list[AtomRetrievalInfo] = []
 
         while len(chosen) < self._max_sub_questions:
-            step_id = f"Sub{len(chosen) + 1}"
+            round_number = len(chosen) + 1
+            step_id = f"Sub{round_number}"
             trace[step_id] = {}
 
+            if on_round:
+                on_round(round_number, "proposing sub-questions")
             should_decompose, thinking, proposals = self._propose_sub_questions(question, chosen)
             trace[step_id]["proposal"] = {"decompose": should_decompose, "thinking": thinking, "sub_questions": proposals}
             if not should_decompose:
                 break
 
+            if on_round:
+                on_round(round_number, "retrieving candidates")
             candidates = self._retrieve_candidates(proposals, question, chosen)
             trace[step_id]["retrieval"] = [
                 {"source": info.source_chunk_title, "chunk_id": info.source_chunk_id, "score": info.retrieval_score}
@@ -130,6 +142,8 @@ class DecompositionOrchestrator:
             if not candidates:
                 break
 
+            if on_round:
+                on_round(round_number, "selecting best candidate")
             selected, thinking, chosen_info = self._select_candidate(question, candidates, chosen)
             trace[step_id]["selection"] = {"selected": selected, "thinking": thinking}
             if not selected or chosen_info is None:
@@ -138,6 +152,8 @@ class DecompositionOrchestrator:
             chosen.append(chosen_info)
             trace[step_id]["selection"]["chosen"] = chosen_info.source_chunk_title
 
+        if on_round:
+            on_round(len(chosen) + 1, "composing final answer")
         output = self._answer_with_context(question, chosen)
         output["decomposition_trace"] = trace
         output["citations"] = [

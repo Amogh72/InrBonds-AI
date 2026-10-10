@@ -211,3 +211,50 @@ class TestVendoredDecompositionProtocols:
         fake_response = '{"answer": "6.9%", "rationale": "from pfc_ncd_2026.pdf p.78"}'
         output = final_qa_protocol.parse_output(fake_response)
         assert output["answer"] == "6.9%"
+
+
+class _FakeLLMClient:
+    """Stands in for a real BaseLLMClient - orchestrator.py only ever calls
+    generate_content_with_messages() on its client, so that's all this needs
+    to implement to drive DecompositionOrchestrator.answer() with no network
+    or DB access."""
+
+    def __init__(self, responses: list[str]):
+        self._responses = list(responses)
+
+    def generate_content_with_messages(self, messages, **llm_config) -> str:
+        return self._responses.pop(0)
+
+
+class TestOrchestratorOnRoundCallback:
+    """
+    answer() can take minutes across several real decomposition rounds with
+    no other signal of progress - on_round is query_service/app.py's hook
+    for posting live status to a page polling a background job. These
+    confirm it fires at the right points and never changes answer()'s
+    actual control flow or return value, on the cheapest possible path
+    (the LLM declines to decompose at all, so no retrieval/Qdrant is hit).
+    """
+
+    def _immediate_answer_client(self):
+        return _FakeLLMClient([
+            '{"thinking": "no decomposition needed", "sub_questions": []}',
+            '{"answer": "42", "rationale": "because"}',
+        ])
+
+    def test_on_round_fires_for_proposal_and_final_answer(self):
+        from orchestrator import DecompositionOrchestrator
+        orchestrator = DecompositionOrchestrator(llm_client=self._immediate_answer_client(), llm_config={})
+
+        calls = []
+        orchestrator.answer("What is it?", on_round=lambda n, phase: calls.append((n, phase)))
+
+        assert calls == [(1, "proposing sub-questions"), (1, "composing final answer")]
+
+    def test_omitting_on_round_does_not_affect_the_result(self):
+        from orchestrator import DecompositionOrchestrator
+        orchestrator = DecompositionOrchestrator(llm_client=self._immediate_answer_client(), llm_config={})
+
+        result = orchestrator.answer("What is it?")
+
+        assert result["answer"] == "42"
