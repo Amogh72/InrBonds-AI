@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>InrBonds AI - Ask a Question</title>
+<style>
+  :root {
+    --bg: #0f1420;
+    --panel: #171d2b;
+    --border: #2a3245;
+    --text: #e8ecf4;
+    --muted: #8893a8;
+    --accent: #4f8cff;
+    --ok: #3ddc84;
+    --err: #ff5d5d;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    display: flex;
+    justify-content: center;
+    padding: 48px 16px;
+  }
+  main { width: 100%; max-width: 680px; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  p.sub { color: var(--muted); margin-top: 0; margin-bottom: 32px; font-size: 14px; }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 24px;
+    margin-bottom: 20px;
+  }
+  label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+  textarea {
+    width: 100%;
+    background: #0d121c;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 12px;
+    color: var(--text);
+    font-size: 14px;
+    font-family: inherit;
+    resize: vertical;
+    min-height: 64px;
+  }
+  button {
+    margin-top: 16px;
+    width: 100%;
+    background: var(--accent);
+    color: white;
+    border: none;
+    border-radius: 6px;
+    padding: 12px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  button.secondary {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    margin-top: 12px;
+  }
+  .progress-line {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 14px;
+    color: var(--text);
+  }
+  .progress-line .dot {
+    width: 10px; height: 10px; border-radius: 50%;
+    background: var(--accent);
+    flex-shrink: 0;
+    animation: pulse 1.2s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 0.35; }
+    50% { opacity: 1; }
+  }
+  .progress-sub { color: var(--muted); font-size: 13px; margin-top: 4px; }
+  pre.error {
+    background: #2a1414;
+    border: 1px solid #512;
+    color: var(--err);
+    padding: 12px;
+    border-radius: 6px;
+    font-size: 12px;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  h3.answer-label { margin: 0 0 8px 0; color: var(--ok); font-size: 14px; }
+  .answer-text { font-size: 15px; line-height: 1.5; margin: 0 0 16px 0; }
+  .rationale { color: var(--muted); font-size: 13px; line-height: 1.5; margin: 0 0 16px 0; }
+  .rationale-label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 4px; }
+  ul.citations { list-style: none; padding: 0; margin: 0; font-size: 13px; }
+  ul.citations li { padding: 4px 0; color: var(--muted); border-top: 1px solid var(--border); }
+  ul.citations li:first-child { border-top: none; }
+  pre.trace {
+    background: #0d121c;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 12px;
+    font-size: 11px;
+    max-height: 420px;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    display: none;
+  }
+  #progress-panel, #result-panel { display: none; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Ask a Bond Document Question</h1>
+  <p class="sub">Runs the PIKE-RAG decomposition loop against whatever documents are loaded (MySQL/Qdrant/Neo4j).</p>
+
+  <div class="panel" id="ask-panel">
+    <form id="ask-form">
+      <label for="question">Question</label>
+      <textarea id="question" name="question" placeholder="e.g. What is PFC's Series III coupon?" required></textarea>
+      <button type="submit" id="submit-btn">Ask</button>
+    </form>
+  </div>
+
+  <div class="panel" id="progress-panel">
+    <div class="progress-line"><span class="dot"></span><span id="progress-text">Starting...</span></div>
+    <div class="progress-sub" id="progress-provider"></div>
+  </div>
+
+  <div class="panel" id="result-panel">
+    <div id="result-ok" style="display:none;">
+      <h3 class="answer-label">Answer</h3>
+      <p class="answer-text" id="answer-text"></p>
+      <div id="rationale-block">
+        <div class="rationale-label">Rationale</div>
+        <p class="rationale" id="rationale-text"></p>
+      </div>
+      <div id="citations-block">
+        <div class="rationale-label">Citations</div>
+        <ul class="citations" id="citations-list"></ul>
+      </div>
+      <button type="button" class="secondary" id="trace-toggle">Show full decomposition trace</button>
+      <pre class="trace" id="trace-pre"></pre>
+    </div>
+    <div id="result-err" style="display:none;">
+      <h3 style="margin-top:0; color: var(--err);">Failed</h3>
+      <pre class="error" id="error-text"></pre>
+    </div>
+  </div>
+</main>
+
+<script>
+const form = document.getElementById("ask-form");
+const submitBtn = document.getElementById("submit-btn");
+const progressPanel = document.getElementById("progress-panel");
+const progressText = document.getElementById("progress-text");
+const progressProvider = document.getElementById("progress-provider");
+const resultPanel = document.getElementById("result-panel");
+const resultOk = document.getElementById("result-ok");
+const resultErr = document.getElementById("result-err");
+const answerText = document.getElementById("answer-text");
+const rationaleBlock = document.getElementById("rationale-block");
+const rationaleText = document.getElementById("rationale-text");
+const citationsBlock = document.getElementById("citations-block");
+const citationsList = document.getElementById("citations-list");
+const traceToggle = document.getElementById("trace-toggle");
+const tracePre = document.getElementById("trace-pre");
+const errorText = document.getElementById("error-text");
+
+let pollTimer = null;
+
+function resetPanels() {
+  progressPanel.style.display = "block";
+  resultPanel.style.display = "none";
+  resultOk.style.display = "none";
+  resultErr.style.display = "none";
+  tracePre.style.display = "none";
+  traceToggle.textContent = "Show full decomposition trace";
+  progressText.textContent = "Starting...";
+  progressProvider.textContent = "";
+}
+
+function renderResult(data) {
+  const result = data.result || {};
+  answerText.textContent = result.answer || "(no answer)";
+
+  if (result.rationale) {
+    rationaleBlock.style.display = "block";
+    rationaleText.textContent = result.rationale;
+  } else {
+    rationaleBlock.style.display = "none";
+  }
+
+  citationsList.innerHTML = "";
+  const citations = result.citations || [];
+  if (citations.length === 0) {
+    citationsBlock.style.display = "none";
+  } else {
+    citationsBlock.style.display = "block";
+    for (const c of citations) {
+      const li = document.createElement("li");
+      li.textContent = c.source;
+      citationsList.appendChild(li);
+    }
+  }
+
+  tracePre.textContent = JSON.stringify(result.decomposition_trace || {}, null, 2);
+}
+
+async function poll(jobId) {
+  try {
+    const res = await fetch(`/api/status/${jobId}`);
+    const data = await res.json();
+
+    if (data.provider) {
+      progressProvider.textContent = `Provider: ${data.provider}`;
+    }
+
+    if (data.status === "queued") {
+      progressText.textContent = "Queued...";
+    } else if (data.status === "running") {
+      const round = data.round || 1;
+      const phase = data.phase || "working";
+      progressText.textContent = `Round ${round}: ${phase}...`;
+    } else if (data.status === "done") {
+      clearInterval(pollTimer);
+      progressPanel.style.display = "none";
+      resultPanel.style.display = "block";
+      resultOk.style.display = "block";
+      renderResult(data);
+      submitBtn.disabled = false;
+    } else if (data.status === "failed") {
+      clearInterval(pollTimer);
+      progressPanel.style.display = "none";
+      resultPanel.style.display = "block";
+      resultErr.style.display = "block";
+      errorText.textContent = data.error || "Unknown error.";
+      submitBtn.disabled = false;
+    }
+  } catch (err) {
+    // transient fetch error - keep polling
+  }
+}
+
+traceToggle.addEventListener("click", () => {
+  const showing = tracePre.style.display === "block";
+  tracePre.style.display = showing ? "none" : "block";
+  traceToggle.textContent = showing ? "Show full decomposition trace" : "Hide full decomposition trace";
+});
+
+form.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  submitBtn.disabled = true;
+  resetPanels();
+
+  const question = document.getElementById("question").value;
+
+  try {
+    const res = await fetch("/api/ask", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: res.statusText }));
+      throw new Error(err.detail || "Request failed.");
+    }
+    const data = await res.json();
+    if (pollTimer) clearInterval(pollTimer);
+    pollTimer = setInterval(() => poll(data.job_id), 1500);
+    poll(data.job_id);
+  } catch (err) {
+    progressPanel.style.display = "none";
+    resultPanel.style.display = "block";
+    resultErr.style.display = "block";
+    errorText.textContent = err.message;
+    submitBtn.disabled = false;
+  }
+});
+</script>
+</body>
+</html>

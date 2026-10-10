@@ -60,13 +60,17 @@ def normalize_series_id(value):
 
 def is_series_cell(value):
     """
-    Only accept standalone Roman numerals.
+    Only accept standalone Roman numerals, optionally followed by
+    footnote markers (one or more asterisks/daggers - a "default
+    allocation" series confirmed in a real prospectus was marked
+    "V**", which a single optional "*" doesn't cover).
 
     Valid:
         I
         II
         II*
         III
+        V**
 
     Invalid:
         ISIN
@@ -81,7 +85,7 @@ def is_series_cell(value):
 
     return bool(
         re.fullmatch(
-            rf"{ROMAN_PATTERN}\*?",
+            rf"{ROMAN_PATTERN}[*†‡]*",
             text,
             re.IGNORECASE
         )
@@ -695,34 +699,50 @@ def clean_amount(value):
 # CATEGORY DETECTION
 # =========================================================
 
+CATEGORY_NUMERAL_ORDER = ["I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X"]
+CATEGORY_NUMERAL_TOKEN_PATTERN = re.compile(
+    r"\b(" + "|".join(CATEGORY_NUMERAL_ORDER) + r")\b",
+    re.IGNORECASE,
+)
+
+
 def extract_category(row_label):
+    """
+    A row label names whichever Investor Category/Categories its
+    value applies to - anywhere from one ("Category IV") up to all
+    of them sharing a single value ("... for NCD Holders in
+    Category I, II, III & IV"), joined by ",", "&", "and", or a
+    repeated "Category"/"Cat" prefix per numeral. Rather than
+    matching known fixed combinations, this scans everything after
+    the first "category"/"cat" keyword for standalone Roman-numeral
+    words and joins whichever ones actually appear - so it covers
+    any combination generically, not just the ones seen so far.
+    """
 
     label = clean_label(row_label).lower()
 
-    if (
-        "category i and category ii" in label
-        or "category i & category ii" in label
-        or "category i and ii" in label
-        or "category i & ii" in label
-        or "category i, ii" in label
-        or "cat i and cat ii" in label
-        or "cat i & cat ii" in label
-    ):
-        return "I_II"
+    keyword_match = re.search(r"\bcat(?:egory)?\.?\s*", label)
 
-    if (
-        "category iii" in label
-        or "cat iii" in label
-    ):
-        return "III"
+    if not keyword_match:
+        return None
 
-    if (
-        "category iv" in label
-        or "cat iv" in label
-    ):
-        return "IV"
+    tail = label[keyword_match.end():]
 
-    return None
+    seen = []
+
+    for token in CATEGORY_NUMERAL_TOKEN_PATTERN.findall(tail):
+
+        numeral = token.upper()
+
+        if numeral not in seen:
+            seen.append(numeral)
+
+    if not seen:
+        return None
+
+    seen.sort(key=lambda numeral: CATEGORY_NUMERAL_ORDER.index(numeral))
+
+    return "_".join(seen)
 
 
 # =========================================================
