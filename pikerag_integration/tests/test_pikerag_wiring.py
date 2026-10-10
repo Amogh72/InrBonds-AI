@@ -65,6 +65,36 @@ class TestGeminiMessageTranslation:
         assert len(contents) == 1
 
 
+class TestGeminiMarkdownFenceStripping:
+    """
+    Gemini routinely wraps JSON responses in a ```json fence even when not
+    asked to, unlike Claude - vendor/pikerag/utils/json_parser.py's
+    rfind-based extraction tolerates a fence around otherwise-valid JSON,
+    but a fence paired with any other hiccup turns into a confusing
+    stray-brace failure. _get_content_from_response strips the fence before
+    content ever reaches the vendored parser.
+    """
+
+    def _client(self):
+        return GeminiClient(api_key="fake-key-for-offline-test")
+
+    class _FakeResponse:
+        def __init__(self, text):
+            self.text = text
+
+    def test_strips_json_fence(self):
+        content = self._client()._get_content_from_response(self._FakeResponse('```json\n{"a": 1}\n```'))
+        assert content == '{"a": 1}'
+
+    def test_strips_bare_fence_without_json_tag(self):
+        content = self._client()._get_content_from_response(self._FakeResponse('```\n{"a": 1}\n```'))
+        assert content == '{"a": 1}'
+
+    def test_leaves_unfenced_content_unchanged(self):
+        content = self._client()._get_content_from_response(self._FakeResponse('{"a": 1}'))
+        assert content == '{"a": 1}'
+
+
 class TestChunkLabel:
 
     def test_includes_document_page_and_section(self):

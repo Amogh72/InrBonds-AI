@@ -15,6 +15,7 @@ Translation notes, mirroring anthropic_client.py's approach:
 """
 
 import os
+import re
 from typing import Any, List
 
 from google import genai
@@ -25,6 +26,16 @@ from pikerag.llm_client.base import BaseLLMClient
 from pikerag.utils.logger import Logger
 
 DEFAULT_MAX_OUTPUT_TOKENS = 2048
+
+# Unlike Claude (which tends to emit bare JSON when a prompt asks for it),
+# Gemini routinely wraps JSON responses in a ```json ... ``` fence even when
+# not asked to. vendor/pikerag/utils/json_parser.py's parse_json() finds
+# JSON by rfind("{")/rfind("}") so a fence around otherwise-valid JSON
+# shouldn't break it on its own, but a fence paired with any other hiccup
+# (an empty/truncated response, say) turns into a confusing stray-brace
+# failure instead of a clean "no JSON found" one. Stripping the fence here,
+# before content ever reaches the vendored parser, removes that confound.
+_MARKDOWN_FENCE_RE = re.compile(r"^```(?:json)?\s*\n?(.*?)\n?```\s*$", re.DOTALL)
 
 
 class GeminiClient(BaseLLMClient):
@@ -115,6 +126,9 @@ class GeminiClient(BaseLLMClient):
 
         try:
             content = response.text or ""
+            fence_match = _MARKDOWN_FENCE_RE.match(content.strip())
+            if fence_match:
+                content = fence_match.group(1)
         except Exception as exc:  # noqa: BLE001
             self.warning(f"Try to get content from response but get exception:\n  {exc}")
             self.debug(f"  Response: {response}\n  Last message: {messages}")
