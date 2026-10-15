@@ -198,13 +198,22 @@ def is_leaf_section(
 def collect_section_pages(
     page_data,
     start_page,
-    end_page
+    end_page,
+    excluded_pages=None
 ):
     """
     Return page-by-page text for a section.
 
     Each item retains its original PDF page number.
+
+    excluded_pages: an optional set of page numbers to leave out
+    entirely (e.g. pages a table extractor already turned into clean
+    structured facts - re-chunking that same page's raw line text as
+    prose would just be a garbled, out-of-order restatement of data
+    that's already correctly represented elsewhere).
     """
+
+    excluded_pages = excluded_pages or set()
 
     pages = []
 
@@ -212,6 +221,9 @@ def collect_section_pages(
         start_page,
         end_page + 1
     ):
+
+        if page_number in excluded_pages:
+            continue
 
         page = page_data.get(
             page_number
@@ -555,10 +567,22 @@ def create_chunks(
     layout_document,
     structure_document,
     target_chars=TARGET_CHARS,
-    overlap_chars=OVERLAP_CHARS
+    overlap_chars=OVERLAP_CHARS,
+    document_id=None,
+    excluded_pages=None
 ):
     """
     Create structure-aware, page-aware chunks.
+
+    document_id: use this exact id for chunk_id generation instead of
+    re-deriving one from layout_document["document"] (the PDF
+    filename). A caller that already has an authoritative document_id
+    (e.g. canonical_extractor.py, which may assign a document_id
+    unrelated to the PDF's filename) should always pass it, so chunk
+    ids stay consistent with the rest of that same canonical document
+    instead of silently drifting from a different, filename-derived id.
+
+    excluded_pages: see collect_section_pages.
     """
 
     page_data = build_page_data(
@@ -593,7 +617,8 @@ def create_chunks(
         section_pages = collect_section_pages(
             page_data,
             start_page,
-            end_page
+            end_page,
+            excluded_pages
         )
 
         if not section_pages:
@@ -625,9 +650,10 @@ def create_chunks(
         "document"
     ]
 
-    document_id = make_document_id(
-        document_name
-    )
+    if document_id is None:
+        document_id = make_document_id(
+            document_name
+        )
 
     for index, chunk in enumerate(
         all_chunks,

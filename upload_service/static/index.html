@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>InrBonds AI - Upload a Bond Document</title>
+<style>
+  :root {
+    --bg: #0f1420;
+    --panel: #171d2b;
+    --border: #2a3245;
+    --text: #e8ecf4;
+    --muted: #8893a8;
+    --accent: #4f8cff;
+    --ok: #3ddc84;
+    --err: #ff5d5d;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    display: flex;
+    justify-content: center;
+    padding: 48px 16px;
+  }
+  main { width: 100%; max-width: 560px; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  p.sub { color: var(--muted); margin-top: 0; margin-bottom: 32px; font-size: 14px; }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 24px;
+    margin-bottom: 20px;
+  }
+  label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 6px; margin-top: 16px; }
+  label:first-child { margin-top: 0; }
+  input[type="text"], input[type="file"] {
+    width: 100%;
+    background: #0d121c;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 12px;
+    color: var(--text);
+    font-size: 14px;
+  }
+  input[type="file"] { padding: 8px; }
+  button {
+    margin-top: 20px;
+    width: 100%;
+    background: var(--accent);
+    color: white;
+    border: none;
+    border-radius: 6px;
+    padding: 12px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .steps { list-style: none; padding: 0; margin: 0; }
+  .steps li {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 0;
+    font-size: 14px;
+    color: var(--muted);
+  }
+  .steps li .dot {
+    width: 10px; height: 10px; border-radius: 50%;
+    background: var(--border);
+    flex-shrink: 0;
+  }
+  .steps li.active { color: var(--text); }
+  .steps li.active .dot { background: var(--accent); }
+  .steps li.done { color: var(--ok); }
+  .steps li.done .dot { background: var(--ok); }
+  .steps li.failed { color: var(--err); }
+  .steps li.failed .dot { background: var(--err); }
+  pre.error {
+    background: #2a1414;
+    border: 1px solid #512;
+    color: var(--err);
+    padding: 12px;
+    border-radius: 6px;
+    font-size: 12px;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .summary-grid {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 6px 16px;
+    font-size: 14px;
+  }
+  .summary-grid dt { color: var(--muted); }
+  .summary-grid dd { margin: 0; }
+  #result-panel, #progress-panel { display: none; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Upload a Bond / NCD Prospectus</h1>
+  <p class="sub">Extracts a canonical document and loads it into MySQL, Qdrant, and Neo4j.</p>
+
+  <div class="panel" id="upload-panel">
+    <form id="upload-form">
+      <label for="file">PDF file</label>
+      <input type="file" id="file" name="file" accept="application/pdf" required>
+
+      <label for="document_id">Document ID (optional - defaults to filename-derived)</label>
+      <input type="text" id="document_id" name="document_id" placeholder="e.g. capri_global_ncd_2026">
+
+      <label for="document_type">Document type (optional)</label>
+      <input type="text" id="document_type" name="document_type" placeholder="Bond/NCD Prospectus">
+
+      <button type="submit" id="submit-btn">Upload &amp; Process</button>
+    </form>
+  </div>
+
+  <div class="panel" id="progress-panel">
+    <ul class="steps">
+      <li data-step="extracting"><span class="dot"></span> Extracting canonical document</li>
+      <li data-step="loading_sql"><span class="dot"></span> Loading into MySQL</li>
+      <li data-step="loading_qdrant"><span class="dot"></span> Loading into Qdrant</li>
+      <li data-step="loading_neo4j"><span class="dot"></span> Loading into Neo4j</li>
+    </ul>
+  </div>
+
+  <div class="panel" id="result-panel">
+    <div id="result-ok" style="display:none;">
+      <h3 style="margin-top:0; color: var(--ok);">Done</h3>
+      <dl class="summary-grid" id="summary-grid"></dl>
+    </div>
+    <div id="result-err" style="display:none;">
+      <h3 style="margin-top:0; color: var(--err);">Failed</h3>
+      <pre class="error" id="error-text"></pre>
+    </div>
+  </div>
+</main>
+
+<script>
+const STEP_ORDER = ["queued", "extracting", "loading_sql", "loading_qdrant", "loading_neo4j", "done"];
+
+const form = document.getElementById("upload-form");
+const submitBtn = document.getElementById("submit-btn");
+const progressPanel = document.getElementById("progress-panel");
+const resultPanel = document.getElementById("result-panel");
+const resultOk = document.getElementById("result-ok");
+const resultErr = document.getElementById("result-err");
+const summaryGrid = document.getElementById("summary-grid");
+const errorText = document.getElementById("error-text");
+
+let pollTimer = null;
+
+function resetPanels() {
+  progressPanel.style.display = "block";
+  resultPanel.style.display = "none";
+  resultOk.style.display = "none";
+  resultErr.style.display = "none";
+  document.querySelectorAll(".steps li").forEach(li => {
+    li.classList.remove("active", "done", "failed");
+  });
+}
+
+function updateSteps(status) {
+  const currentIndex = STEP_ORDER.indexOf(status);
+  document.querySelectorAll(".steps li").forEach(li => {
+    const stepIndex = STEP_ORDER.indexOf(li.dataset.step);
+    li.classList.remove("active", "done", "failed");
+    if (status === "failed") {
+      if (stepIndex <= currentIndex) li.classList.add(stepIndex < currentIndex ? "done" : "failed");
+    } else if (stepIndex < currentIndex) {
+      li.classList.add("done");
+    } else if (stepIndex === currentIndex) {
+      li.classList.add("active");
+    }
+  });
+}
+
+function renderSummary(summary) {
+  summaryGrid.innerHTML = "";
+  const rows = [
+    ["Issuer", summary.issuer],
+    ["Document", summary.document_name],
+    ["Series", summary.series_count],
+    ["Ratings", summary.ratings_count],
+    ["Lead managers", summary.lead_managers_count],
+    ["Debenture trustee", summary.debenture_trustee || "-"],
+    ["Chunks indexed", summary.chunk_count],
+  ];
+  for (const [label, value] of rows) {
+    const dt = document.createElement("dt");
+    dt.textContent = label;
+    const dd = document.createElement("dd");
+    dd.textContent = value;
+    summaryGrid.appendChild(dt);
+    summaryGrid.appendChild(dd);
+  }
+}
+
+async function poll(jobId) {
+  try {
+    const res = await fetch(`/api/status/${jobId}`);
+    const data = await res.json();
+    updateSteps(data.status);
+
+    if (data.status === "done") {
+      clearInterval(pollTimer);
+      resultPanel.style.display = "block";
+      resultOk.style.display = "block";
+      renderSummary(data.summary);
+      submitBtn.disabled = false;
+    } else if (data.status === "failed") {
+      clearInterval(pollTimer);
+      updateSteps("failed");
+      resultPanel.style.display = "block";
+      resultErr.style.display = "block";
+      errorText.textContent = data.error || "Unknown error.";
+      submitBtn.disabled = false;
+    }
+  } catch (err) {
+    // transient fetch error - keep polling
+  }
+}
+
+form.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  submitBtn.disabled = true;
+  resetPanels();
+
+  const formData = new FormData(form);
+
+  try {
+    const res = await fetch("/api/upload", { method: "POST", body: formData });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: res.statusText }));
+      throw new Error(err.detail || "Upload failed.");
+    }
+    const data = await res.json();
+    if (pollTimer) clearInterval(pollTimer);
+    pollTimer = setInterval(() => poll(data.job_id), 1500);
+    poll(data.job_id);
+  } catch (err) {
+    resultPanel.style.display = "block";
+    resultErr.style.display = "block";
+    errorText.textContent = err.message;
+    submitBtn.disabled = false;
+  }
+});
+</script>
+</body>
+</html>
