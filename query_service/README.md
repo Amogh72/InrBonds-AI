@@ -83,6 +83,6 @@ to see the reasoning, not just take the answer on faith.
   the UI, so end users never need their own API key.
 - **Same scope limitations as `pikerag_integration/` itself** — see
   that project's README's "Current scope and honest limitations"
-  section (single retrieval tool, no deliberate multi-document
-  routing). This service is a UI on top of that loop, not a fix for
-  its gaps.
+  section (structured SQL/graph retrieval only covers known entities
+  by name/alias). This service is a UI on top of that loop, not a fix
+  for its gaps.

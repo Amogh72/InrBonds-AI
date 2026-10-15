@@ -30,6 +30,7 @@ Each step, concretely:
 """
 
 import sys
+from itertools import chain
 from pathlib import Path
 from typing import Any, Callable
 
@@ -46,6 +47,7 @@ from pikerag.prompts.decomposition import (  # noqa: E402
 )
 
 from retrieval.mcp_retrieval import retrieve_atom_info_candidates  # noqa: E402
+from retrieval.structured_retrieval import retrieve_structured_candidates  # noqa: E402
 
 DEFAULT_MAX_SUB_QUESTIONS = 5
 
@@ -68,6 +70,21 @@ class DecompositionOrchestrator:
         content = self._client.generate_content_with_messages(messages, **self._llm_config)
         return question_decompose_protocol.parse_output(content)
 
+    def _candidates_for(self, query: str) -> list[AtomRetrievalInfo]:
+        """
+        Every retrieval source for one sub-question, chained together:
+        vector_search (always) plus, when the sub-question's text matches
+        this project's known issuer/participant/series vocabulary,
+        structured SQL/graph lookups too (see structured_retrieval.py's
+        module docstring for why this stays rule-based rather than an
+        LLM-driven tool router). Structured results are additive, never a
+        replacement - vector_search output is untouched either way.
+        """
+        return list(chain(
+            retrieve_atom_info_candidates(query, top_k=self._retrieve_top_k),
+            retrieve_structured_candidates(query),
+        ))
+
     def _retrieve_candidates(
         self, proposals: list[str], original_question: str, chosen: list[AtomRetrievalInfo],
     ) -> list[AtomRetrievalInfo]:
@@ -76,7 +93,7 @@ class DecompositionOrchestrator:
         candidates: list[AtomRetrievalInfo] = []
         seen_chunk_ids: set[str] = set()
         for proposal in proposals:
-            for candidate in retrieve_atom_info_candidates(proposal, top_k=self._retrieve_top_k):
+            for candidate in self._candidates_for(proposal):
                 if candidate.source_chunk_id in chosen_chunk_ids or candidate.source_chunk_id in seen_chunk_ids:
                     continue
                 seen_chunk_ids.add(candidate.source_chunk_id)
@@ -85,7 +102,7 @@ class DecompositionOrchestrator:
         # Backup: if the proposed sub-questions found nothing new, fall back
         # to searching with the original question directly.
         if not candidates:
-            for candidate in retrieve_atom_info_candidates(original_question, top_k=self._retrieve_top_k):
+            for candidate in self._candidates_for(original_question):
                 if candidate.source_chunk_id in chosen_chunk_ids or candidate.source_chunk_id in seen_chunk_ids:
                     continue
                 seen_chunk_ids.add(candidate.source_chunk_id)

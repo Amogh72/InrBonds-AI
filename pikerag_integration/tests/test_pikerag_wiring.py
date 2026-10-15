@@ -27,7 +27,9 @@ from pikerag.prompts.decomposition import (  # noqa: E402
 )
 
 from retrieval.mcp_retrieval import _chunk_label, retrieve_atom_info_candidates  # noqa: E402
-from models import ToolSuccess  # noqa: E402 (mcp_server/models.py, on sys.path via mcp_retrieval's own import)
+from models import ToolSuccess, ToolError, Citation  # noqa: E402 (mcp_server/models.py, on sys.path via mcp_retrieval's own import)
+import retrieval.structured_retrieval as structured_retrieval  # noqa: E402
+from retrieval.structured_retrieval import retrieve_structured_candidates  # noqa: E402
 
 
 class TestAnthropicMessageTranslation:
@@ -311,3 +313,135 @@ class TestOrchestratorOnRoundCallback:
         result = orchestrator.answer("What is it?")
 
         assert result["answer"] == "42"
+
+
+_FAKE_ISSUE_OVERVIEW = ToolSuccess(
+    tool="sql_get_issue_overview",
+    data=[{
+        "issue_id": 1, "issuer": "Power Finance Corporation Limited",
+        "document_name": "pfc_ncd_2026.pdf", "issue_name": "Tranche I Issue",
+        "debenture_trustee": "Beacon Trusteeship Limited",
+        "ratings": [{"agency": "CRISIL Ratings Limited", "rating": "Crisil AAA/Stable"}],
+        "lead_managers": ["A.K. Capital Services Limited"],
+    }],
+    citations=[Citation(source_type="sql", source_id="issue:1", document_name="pfc_ncd_2026.pdf", section="Tranche I Issue")],
+    row_count=1,
+)
+
+
+class TestStructuredRetrieval:
+    """
+    Offline tests for structured_retrieval.py's rule-based routing - no
+    live MySQL/Neo4j needed, sql_db/graph_db's methods are monkeypatched
+    directly, same pattern TestRetrieveAtomInfoCandidates uses for
+    vector_db.search. Each test resets the module-level entity-vocabulary
+    cache first so tests don't leak into each other.
+    """
+
+    def setup_method(self):
+        structured_retrieval._entity_cache = None
+
+    def test_unrelated_question_matches_nothing(self, monkeypatch):
+        monkeypatch.setattr(structured_retrieval.sql_db, "get_issue_overview", lambda **kw: _FAKE_ISSUE_OVERVIEW)
+        candidates = retrieve_structured_candidates("What does ASBA mean?")
+        assert candidates == []
+
+    def test_series_and_category_routes_to_sql_search_bond_terms(self, monkeypatch):
+        monkeypatch.setattr(structured_retrieval.sql_db, "get_issue_overview", lambda **kw: _FAKE_ISSUE_OVERVIEW)
+
+        captured = {}
+
+        def fake_search_bond_terms(**kwargs):
+            captured.update(kwargs)
+            return ToolSuccess(
+                tool="sql_search_bond_terms",
+                data=[{
+                    "issuer": "Power Finance Corporation Limited", "document_name": "pfc_ncd_2026.pdf",
+                    "series_code": "III", "category_code": "III", "tenor": "10 years 1 Month",
+                    "coupon_type": "Zero Coupon", "frequency": "Zero Coupon NCD",
+                    "face_value_inr": "100000.00", "coupon_percent": None,
+                    "effective_yield_percent": "6.8500", "issue_price_inr": "51263.00",
+                    "maturity_amount_inr": "100000.00",
+                }],
+                citations=[Citation(source_type="sql", source_id="series:3", document_name="pfc_ncd_2026.pdf", section="Series III / Category III")],
+                row_count=1,
+            )
+        monkeypatch.setattr(structured_retrieval.sql_db, "search_bond_terms", fake_search_bond_terms)
+
+        candidates = retrieve_structured_candidates("What is PFC's Series III Category III effective yield?")
+
+        assert captured["series_code"] == "III"
+        assert captured["category_code"] == "III"
+        assert captured["issuer"] == "Power Finance Corporation Limited"
+        assert len(candidates) == 1
+        assert candidates[0].source_chunk_id == "sql:series:3"
+        assert "6.8500" in candidates[0].source_chunk
+        assert candidates[0].atom.startswith("[SQL]")
+
+    def test_trustee_keyword_routes_to_issue_overview(self, monkeypatch):
+        monkeypatch.setattr(structured_retrieval.sql_db, "get_issue_overview", lambda **kw: _FAKE_ISSUE_OVERVIEW)
+
+        candidates = retrieve_structured_candidates("Who is PFC's debenture trustee?")
+
+        assert len(candidates) == 1
+        assert candidates[0].source_chunk_id == "sql:issue:1"
+        assert "Beacon Trusteeship Limited" in candidates[0].source_chunk
+
+    def test_participant_mention_routes_to_graph_find_issues_by_participant(self, monkeypatch):
+        monkeypatch.setattr(structured_retrieval.sql_db, "get_issue_overview", lambda **kw: _FAKE_ISSUE_OVERVIEW)
+
+        captured = {}
+
+        def fake_find_issues_by_participant(participant_name, **kwargs):
+            captured["participant_name"] = participant_name
+            return ToolSuccess(
+                tool="graph_query",
+                data=[
+                    {"issuer": "Power Finance Corporation Limited", "issue_id": "pfc_ncd_2026_issue_1",
+                     "issue_name": "Tranche I Issue", "document_name": "pfc_ncd_2026.pdf",
+                     "participant_name": "Beacon Trusteeship Limited", "participant_role": "DebentureTrustee"},
+                    {"issuer": "360 ONE Prime Limited", "issue_id": "iifl_wealth_prime_2023_issue_1",
+                     "issue_name": "Tranche I Issue", "document_name": "iifl_wealth_prime_2023.pdf",
+                     "participant_name": "Beacon Trusteeship Limited", "participant_role": "DebentureTrustee"},
+                ],
+                citations=[
+                    Citation(source_type="graph", source_id="cypher_result:0"),
+                    Citation(source_type="graph", source_id="cypher_result:1"),
+                ],
+                row_count=2,
+            )
+        monkeypatch.setattr(structured_retrieval.graph_db, "find_issues_by_participant", fake_find_issues_by_participant)
+
+        candidates = retrieve_structured_candidates("Which issuers share Beacon Trusteeship as debenture trustee?")
+
+        assert captured["participant_name"] == "Beacon Trusteeship Limited"
+        assert len(candidates) == 2
+        # Distinct, content-derived chunk_ids - not the raw "cypher_result:N"
+        # citation id, which would collide across separate graph calls.
+        ids = {c.source_chunk_id for c in candidates}
+        assert len(ids) == 2
+        assert all(cid.startswith("graph:") for cid in ids)
+
+    def test_entity_vocabulary_is_cached_across_calls(self, monkeypatch):
+        call_count = {"n": 0}
+
+        def counting_get_issue_overview(**kw):
+            call_count["n"] += 1
+            return _FAKE_ISSUE_OVERVIEW
+        monkeypatch.setattr(structured_retrieval.sql_db, "get_issue_overview", counting_get_issue_overview)
+
+        retrieve_structured_candidates("What does ASBA mean?")
+        retrieve_structured_candidates("What is risk factor disclosure?")
+
+        assert call_count["n"] == 1
+
+    def test_tool_error_from_sql_yields_no_candidates_not_a_crash(self, monkeypatch):
+        monkeypatch.setattr(structured_retrieval.sql_db, "get_issue_overview", lambda **kw: _FAKE_ISSUE_OVERVIEW)
+        monkeypatch.setattr(
+            structured_retrieval.sql_db, "search_bond_terms",
+            lambda **kw: ToolError(error="query_failed", detail="simulated"),
+        )
+
+        candidates = retrieve_structured_candidates("What is PFC's Series III coupon?")
+
+        assert candidates == []

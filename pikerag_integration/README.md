@@ -108,20 +108,40 @@ python cli.py "What is PFC's Series III coupon?" --provider gemini
 sub-question round, not just the final answer - useful for seeing the
 decomposition actually working rather than taking it on faith.
 
+## Structured retrieval (SQL + graph), alongside vector search
+
+Every proposed sub-question is retrieved two ways at once, chained
+together in `orchestrator.py`'s `_candidates_for`:
+
+- `retrieval/mcp_retrieval.py` - `vector_search` (Qdrant), as before, always.
+- `retrieval/structured_retrieval.py` - rule-based routing to
+  `sql_search_bond_terms`, `sql_get_issue_overview`, and
+  `graph_find_issues_by_participant` when the sub-question's text matches
+  this project's known vocabulary (issuer names/short aliases like "PFC",
+  participant names like "Beacon Trusteeship", or a "Series X Category Y"
+  pattern).
+
+Both sources feed the same `AtomRetrievalInfo` shape and compete for
+selection through the same, unchanged vendored selection prompt - a
+question like "who is PFC's debenture trustee" now gets an exact SQL row
+as a candidate alongside whatever `vector_search` found, instead of
+relying on semantic similarity alone to surface it. Structured candidates
+are strictly additive: `vector_search` always still runs too, so this can
+only add recall, never remove it.
+
+This stays rule-based (not an LLM-driven tool router) specifically to add
+zero extra LLM round-trips - see `structured_retrieval.py`'s module
+docstring for the reasoning. It's a reasonable fit for this project's
+scale (a handful of issuers/participants, fully enumerable with one SQL
+call) but wouldn't generalize as-is to an open-domain system with an
+unbounded entity vocabulary.
+
 ## Current scope and honest limitations
 
-- **Single retrieval tool.** Sub-questions are only ever routed through
-  `vector_search`. `sql_search_bond_terms`/`graph_query` exist and are
-  citation-complete, but routing an LLM-generated sub-question string to the
-  right *structured* tool (which needs typed filters, not free text) is a
-  separate decision, not implemented here yet - see `retrieval/
-  mcp_retrieval.py`'s module docstring.
-- **No multi-document routing.** A question spanning several issuers (e.g.
-  "which issuers has Beacon Trusteeship served") will retrieve whatever
-  `vector_search` ranks highest across all loaded documents, not
-  deliberately fan out per-issuer - `graph_find_issues_by_participant` would
-  answer that specific shape of question far more precisely and is not yet
-  wired in.
+- **Structured routing only covers known entities.** If a sub-question
+  doesn't mention a loaded issuer/participant by name (or alias) or a
+  "Series X"/"Category Y" pattern, it's semantic-search-only, same as
+  before `structured_retrieval.py` existed.
 - **Not load-tested.** Works against the single-question CLI case; no
-  concurrency, rate-limit handling beyond `AnthropicClient`'s basic retry, or
+  concurrency, rate-limit handling beyond each client's basic retry, or
   cost/latency benchmarking has been done yet.
