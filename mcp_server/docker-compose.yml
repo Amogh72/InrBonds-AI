@@ -10,7 +10,7 @@ services:
       MYSQL_USER: mcp_readonly
       MYSQL_PASSWORD: changeme
     ports:
-      - "3306:3306"
+      - "${MYSQL_HOST_PORT:-3306}:3306"
     volumes:
       - mysql_data:/var/lib/mysql
       - ./sql/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
