@@ -1,0 +1,10 @@
+# Pinned below 2.0: mcp 2.x renamed FastMCP to MCPServer and changed its
+# API. server.py here uses the v1 FastMCP decorator-based API throughout.
+mcp[cli]>=1.2.0,<2
+sqlalchemy>=2.0
+mysql-connector-python>=9.0
+qdrant-client>=1.9
+neo4j>=5.20
+pydantic>=2.7
+python-dotenv>=1.0
+sentence-transformers>=3.0

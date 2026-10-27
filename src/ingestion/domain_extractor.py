@@ -374,14 +374,21 @@ def _is_nameable_token(token):
     a small connector word/ampersand commonly found inside
     company names.
 
-    Digit-bearing tokens are deliberately excluded even though
-    they're often capitalized (e.g. "CIN:", ISIN codes like
-    "INE001A01036", registration numbers) - real company names
-    essentially never contain digits, and without this check
-    those codes chain onto a nearby real company name and
-    produce garbage captures (confirmed against the real PDF,
-    where a CIN/ISIN block sits directly next to "Beacon
-    Trusteeship Limited").
+    A token mixing letters AND digits is excluded (e.g. "CIN:",
+    ISIN codes like "INE001A01036", registration numbers, "PAN:
+    AAACP1570H") - that's the actual shape of a code/identifier,
+    and without this check those codes chain onto a nearby real
+    company name and produce garbage captures (confirmed against
+    the real PDF, where a CIN/ISIN block sits directly next to
+    "Beacon Trusteeship Limited").
+
+    A PURELY numeric token is a different shape and is NOT
+    excluded - confirmed against a second real prospectus, where
+    excluding "360" truncated the issuer's actual name, "360 ONE
+    Prime Limited", down to "ONE Prime Limited". A stylized
+    numeral used as a brand word is a real, if less common,
+    company-naming pattern; a code/identifier mixing letters and
+    digits in one token is not.
     """
 
     if any(char in DEFINED_TERM_QUOTE_CHARS for char in token):
@@ -407,8 +414,14 @@ def _is_nameable_token(token):
     if cleaned.lower() in JOB_TITLE_WORDS:
         return False
 
-    if any(char.isdigit() for char in cleaned):
+    has_digit = any(char.isdigit() for char in cleaned)
+    has_letter = any(char.isalpha() for char in cleaned)
+
+    if has_digit and has_letter:
         return False
+
+    if has_digit and not has_letter:
+        return True
 
     return cleaned[0].isupper()
 
@@ -1060,6 +1073,339 @@ def extract_isin(text):
         {"entity_type": "ISIN", "value": match.group(1)}
         for match in ISIN_PATTERN.finditer(text)
     ]
+
+
+# =========================================================
+# DOCUMENT/ISSUE-LEVEL EXTRACTORS
+#
+# These are called directly against a single page's (or the
+# whole document's) text by canonical_extractor.py, rather than
+# through the per-chunk entity/relationship pipeline above. They
+# answer a different kind of question: not "what entities are
+# mentioned anywhere in this document" (many mentions, graph
+# nodes), but "what is THE issue-open-date / THE listing
+# exchange / THE per-agency credit rating for this document"
+# (a small number of specific, structurally-located facts with
+# page-level provenance). Every pattern here is still a generic,
+# structural SEBI-prospectus convention - not tied to any one
+# issuer's wording - the same as everything above.
+# =========================================================
+
+MONTH_NAMES = (
+    r"(?:January|February|March|April|May|June|July|"
+    r"August|September|October|November|December)"
+)
+
+WEEKDAY_NAMES = (
+    r"(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)"
+)
+
+DATE_PATTERN = (
+    rf"(?:{WEEKDAY_NAMES},?\s+)?{MONTH_NAMES}\s+\d{{1,2}},?\s*\d{{4}}"
+)
+
+# Standard outlook vocabulary shared by every major Indian credit
+# rating agency (CRISIL/ICRA/CARE/India Ratings/Brickwork/Acuite
+# all use the same small set of outlook words) - generic
+# industry terminology, not specific to any one agency or issuer.
+OUTLOOK_VOCABULARY = [
+    "Stable", "Positive", "Negative", "Rating Watch",
+    "Under Review", "Developing",
+]
+
+
+def extract_issue_open_date(text):
+    """
+    Generic SEBI-prospectus "Issue Opens on <date>" disclosure
+    (optionally prefixed "Tranche N"). Standard across Indian NCD
+    prospectuses, not specific to any one issuer.
+    """
+
+    match = re.search(
+        rf"Issue\s+Opens?\s+on\s*:?\s*({DATE_PATTERN})",
+        text,
+        re.IGNORECASE,
+    )
+
+    return normalize_text(match.group(1)) if match else None
+
+
+def extract_issue_close_date(text):
+    """Symmetric counterpart to extract_issue_open_date."""
+
+    match = re.search(
+        rf"Issue\s+Closes?\s+on\s*:?\s*({DATE_PATTERN})",
+        text,
+        re.IGNORECASE,
+    )
+
+    return normalize_text(match.group(1)) if match else None
+
+
+def extract_document_date(text):
+    """
+    Generic SEBI-prospectus cover-page convention: a prospectus
+    states its own filing date as "this [Tranche N] Prospectus
+    dated <date>". Requiring the preceding "this" avoids picking
+    up a REFERENCED prior document's date (e.g. an earlier Shelf
+    Prospectus, which is a different document with its own,
+    earlier date).
+    """
+
+    match = re.search(
+        rf"this\s+(?:tranche\s+[ivxlcdm]+\s+)?prospectus\s+dated\s+"
+        rf"({DATE_PATTERN})",
+        text,
+        re.IGNORECASE,
+    )
+
+    return normalize_text(match.group(1)) if match else None
+
+
+def extract_issue_name(text):
+    """
+    Generic "Tranche N Issue" naming convention used by shelf
+    prospectuses that offer NCDs across multiple tranches. Returns
+    None (rather than inventing a name) for issuers/documents that
+    don't use tranche structuring at all.
+    """
+
+    match = re.search(
+        r"TRANCHE\s+([IVXLCDM]+)\s+ISSUE\b",
+        text,
+        re.IGNORECASE,
+    )
+
+    if not match:
+        return None
+
+    return f"Tranche {match.group(1).upper()} Issue"
+
+
+def extract_shelf_limit(text):
+    """
+    Generic shelf-prospectus disclosure: the aggregate amount a shelf
+    program is registered for, stated as "Shelf Limit of <amount>"
+    (cover-page style) or "Shelf Limit ... being <amount>" (defined-terms
+    style). Only present for shelf-prospectus-based issuers - returns
+    None for a standalone single-issuance bond document, rather than
+    inventing a value.
+    """
+
+    match = re.search(
+        rf"Shelf\s+Limit\s*(?:of)?\s*({CURRENCY_AMOUNT})",
+        text,
+        re.IGNORECASE,
+    )
+
+    if not match:
+        match = re.search(
+            rf"Shelf\s+Limit.{{0,100}}?being,?\s*({CURRENCY_AMOUNT})",
+            text,
+            re.IGNORECASE | re.DOTALL,
+        )
+
+    return normalize_text(match.group(1)) if match else None
+
+
+def extract_green_shoe_option(text):
+    """
+    Generic market-standard "Green Shoe Option" disclosure (an
+    over-allotment option). Confirmed against two real prospectuses
+    that state it in opposite orders: "Green Shoe Option of
+    <amount>" (term then amount), and "<amount> ("Green Shoe
+    Option")" (amount then term, as a trailing defined-term alias -
+    matching this direction too is what stopped an unrelated,
+    similarly-worded amount from a HISTORICAL issuances table
+    elsewhere in that same document from being picked up instead).
+    Returns None for an issue without one.
+    """
+
+    match = re.search(
+        rf"Green\s+Shoe\s+Option\s*(?:of)?\s*({CURRENCY_AMOUNT})",
+        text,
+        re.IGNORECASE,
+    )
+
+    if not match:
+        match = re.search(
+            rf"({CURRENCY_AMOUNT})\s*\([" + QUOTE_CHARS + r"]\s*"
+            rf"Green\s+Shoe\s+Option\s*[" + QUOTE_CHARS + r"]\)",
+            text,
+            re.IGNORECASE,
+        )
+
+    return normalize_text(match.group(1)) if match else None
+
+
+def extract_listing_exchange(text):
+    """
+    Generic SEBI-prospectus convention: "...proposed to be listed
+    on the <Exchange Name> ("<Alias>") ...". Returns
+    {"exchange": full_name, "exchange_alias": alias_or_None} or
+    None if the phrase isn't present.
+    """
+
+    match = re.search(
+        r'listed on the\s+([A-Z][\w .]+?(?:Limited|Ltd\.?))'
+        r'(?:\s*\(["“]([A-Za-z0-9 .&\'-]{1,20})["”]\))?',
+        text,
+    )
+
+    if not match:
+        return None
+
+    return {
+        "exchange": normalize_text(match.group(1)),
+        "exchange_alias": (
+            normalize_text(match.group(2)) if match.group(2) else None
+        ),
+    }
+
+
+def _clean_rating_grade_block(raw_block):
+    """
+    Normalize a captured rating-grade string and, where it states
+    one, pull out a separately identifiable outlook word from
+    OUTLOOK_VOCABULARY. The full raw block is always preserved by
+    the caller as source_text, so nothing here is lossy - this is
+    purely a convenience split for structured querying.
+    """
+
+    text = normalize_text(raw_block).strip(" \t\n" + QUOTE_CHARS)
+
+    # A "(pronounced ...)" aside is a pronunciation guide, never part
+    # of the rating notation itself - safe to drop wherever it lands
+    # inside the captured grade text (some prospectuses' quote marks
+    # span the whole thing, others stop short of it).
+    text = re.sub(r"\(\s*pronounced.*?\)", "", text, flags=re.IGNORECASE).strip()
+
+    outlook = None
+
+    for word in OUTLOOK_VOCABULARY:
+
+        if re.search(rf"\b{re.escape(word)}\b", text, re.IGNORECASE):
+            outlook = word
+            break
+
+    return text, outlook
+
+
+# Generic SEBI-prospectus "Documents for Inspection" / "Material
+# Contracts" annexure convention: every credit rating letter
+# obtained for an issue is individually itemized this way,
+# regardless of how many agencies rated the issue or what their
+# names are - the pattern is the structural marker, not any
+# agency's literal name.
+#
+# The grade itself is captured strictly between a quote character
+# and the next closing quote character of ANY kind (straight or
+# curly, opening/closing type not required to match - real PDF
+# text layers routinely produce mismatched quote pairs). This is
+# deliberately NOT bounded by a trailing phrase like "in respect
+# of": a first version of this pattern did that and, confirmed
+# against a second real prospectus that closes each item with "for
+# the Issue" instead, silently consumed several unrelated
+# following list items (annexure entries 13-18) as part of one
+# match - which also meant the next agency's own rating letter
+# item was skipped entirely, since finditer resumes after the
+# over-long match. Stopping at the nearest quote character avoids
+# depending on any particular closing phrase at all. Both the
+# preceding text runs and the grade itself are also bounded to a
+# generous but finite length as defense in depth, so a document
+# using neither expected phrasing fails to match cleanly rather
+# than running away across the page.
+#
+# Agency names occasionally join words with a bare connector -
+# "Acuite Ratings & Research Limited", "Infomerics Valuation and
+# Rating Limited" - and neither "&" nor "and" is itself
+# capitalized, so each needs its own alternative inside the
+# repeated word group rather than relying on the leading-capital
+# rule that covers every other word.
+RATING_AGENCY_NAME_PATTERN = (
+    r"[A-Z][\w.&-]*(?:\s+(?:[A-Z][\w.&-]*|&|(?i:and))){0,5}?"
+)
+
+# The grade's inner content excludes every quote character, not
+# just the pair it started with, so a candidate opening quote can
+# only ever pair with its OWN nearest closing quote. Without this,
+# a lazy `.` (which happily crosses other quote characters under
+# DOTALL) can be forced to skip an unrelated, closer quoted phrase
+# and latch onto a later one instead, whenever something follows
+# the near closing quote that the pattern also requires to match
+# (confirmed against a third real prospectus, where an unrelated
+# earlier quoted cross-reference - "Issue Structure" - sat right
+# before the real rating grade on the same page, and the ALT
+# pattern's own trailing "for an amount of" requirement pulled the
+# match back to start at that earlier quote instead).
+RATING_GRADE_PATTERN = (
+    r"[" + QUOTE_CHARS + r"](?P<grade>[^" + QUOTE_CHARS + r"]{2,150})[" + QUOTE_CHARS + r"]"
+)
+
+RATING_LETTER_PATTERN = re.compile(
+    r"(?i:credit rating letter dated)\s+(?P<date>" + DATE_PATTERN + r").{0,250}?"
+    r"(?i:by)\s+(?P<agency>" + RATING_AGENCY_NAME_PATTERN + r")\s+"
+    r"(?i:assigning a rating of)\s*"
+    + RATING_GRADE_PATTERN,
+    re.DOTALL,
+)
+
+# A second, structurally distinct convention (confirmed against a
+# third real prospectus): "have been rated "<grade>" for an amount
+# of <amount> by <agency> vide its rating letter dated <date>".
+# Unlike RATING_LETTER_PATTERN, the word "rated" only precedes the
+# FIRST item in a list of several - later items are joined with
+# "and" and drop it entirely - so the grade can't be anchored to
+# "rated" itself. Instead the grade is anchored to the quoted text
+# immediately before "for an amount of", which every item repeats.
+RATING_LETTER_PATTERN_ALT = re.compile(
+    RATING_GRADE_PATTERN + r"\s*"
+    r"(?i:for an amount of)\s+.{0,80}?\s+"
+    r"(?i:by)\s+(?P<agency>" + RATING_AGENCY_NAME_PATTERN + r")\s+"
+    r"(?i:vide its rating letter dated)\s+(?P<date>" + DATE_PATTERN + r")",
+    re.DOTALL,
+)
+
+
+def extract_rating_letter_items(text):
+    """
+    Extract individually-itemized credit rating letters, trying
+    both known real-world phrasings (RATING_LETTER_PATTERN and
+    RATING_LETTER_PATTERN_ALT). Returns a list of dicts:
+        {agency, rating, outlook, rating_date, source_text}
+    Never merges two agencies' ratings into one item - each
+    regex match is one agency's one rating letter. A document
+    only ever uses one convention, but matches from both patterns
+    are still merged and ordered by where they appear, so nothing
+    depends on which pattern happens to run first.
+    """
+
+    matches = []
+
+    for pattern in (RATING_LETTER_PATTERN, RATING_LETTER_PATTERN_ALT):
+        for match in pattern.finditer(text):
+            matches.append(match)
+
+    matches.sort(key=lambda match: match.start())
+
+    results = []
+
+    for match in matches:
+
+        core, outlook = _clean_rating_grade_block(match.group("grade"))
+
+        if not core:
+            continue
+
+        results.append({
+            "agency": normalize_text(match.group("agency")),
+            "rating": core,
+            "outlook": outlook,
+            "rating_date": normalize_text(match.group("date")),
+            "source_text": normalize_text(match.group(0)),
+        })
+
+    return results
 
 
 ENTITY_EXTRACTORS = [
